@@ -45,16 +45,17 @@ void UsrAI::scoutWithPriest(const tagInfo& info)
     if (m_issued.count(priestSN)) return;           // 本帧已被其他模块下令（如避险撤退）
 
     // 2) 探路结束 → 回祭司站位（双塔中点 > 单塔 > 市中心）
-    if (m_scoutIdx >= SCOUT_MAX_COUNT || info.GameFrame > FRAME_WAVE1) {
+    //    提前结束：第一波前 1500 帧（4500帧）就回塔，留时间准备防御
+    if (m_scoutIdx >= SCOUT_MAX_COUNT || info.GameFrame > FRAME_WAVE1 - 1500) {
         if (m_centerX >= 0) {
             int hx, hy;
             getPriestHome(info, hx, hy);
             double homeDR = (double)hx * BLOCKSIDELENGTH;
             double homeUR = (double)hy * BLOCKSIDELENGTH;
-            // 还没回到基地附近（5格内）且空闲 → 下令回家
+            // 还没回到基地附近（5格内）且空闲 → 下令回家（节流下令，防每帧重复）
             if (calDistance(priest->DR, priest->UR, homeDR, homeUR) > 5.0 * BLOCKSIDELENGTH
                 && priest->NowState == HUMAN_STATE_IDLE) {
-                HumanMove(priestSN, homeDR, homeUR);
+                movePriest(priestSN, priest->DR, priest->UR, homeDR, homeUR, info.GameFrame);
             }
         }
         return;
@@ -116,10 +117,10 @@ void UsrAI::scoutWithPriest(const tagInfo& info)
         return;
     }
 
-    // 6) 祭司空闲 → 下令前往目标
+    // 6) 祭司空闲 → 下令前往目标（节流下令；只有真下令才记录开始帧，卡住超时才准确）
     if (priest->NowState == HUMAN_STATE_IDLE) {
-        HumanMove(priestSN, tx, ty);
-        m_scoutStartFrame = info.GameFrame;
+        if (movePriest(priestSN, priest->DR, priest->UR, tx, ty, info.GameFrame))
+            m_scoutStartFrame = info.GameFrame;
     }
     // 7) 卡住超时：下令后 120 帧（5秒）还没到达 → 换新目标（缩短超时，避免傻站）
     else if (m_scoutStartFrame >= 0 && info.GameFrame - m_scoutStartFrame > 120) {
@@ -319,7 +320,7 @@ bool UsrAI::findBuildBlock(const tagInfo& info, int& x, int& y, int w, int h, in
 void UsrAI::manageVillagers(const tagInfo& info)
 {
     // 1) 统计当前各工种人数（通过工作对象 SN 查类型）
-    int total = 0, foodCnt = 0, berryCnt = 0, woodCnt = 0, stoneCnt = 0, goldCnt = 0;
+    int total = 0, foodCnt = 0, berryCnt = 0, woodCnt = 0, stoneCnt = 0, goldCnt = 0, huntCnt = 0;
     bool berryExists = false;
     for (const tagResource& r : info.resources)
         if (r.Type == RESOURCE_BUSH && r.Cnt > 0) berryExists = true;
@@ -342,7 +343,7 @@ void UsrAI::manageVillagers(const tagInfo& info)
             case RESOURCE_GAZELLE:
             case RESOURCE_ELEPHANT:
             case RESOURCE_LION:
-            case RESOURCE_FISH:   foodCnt++; break;
+            case RESOURCE_FISH:   foodCnt++; if (r.Type != RESOURCE_FISH) huntCnt++; break;
             case RESOURCE_TREE:   woodCnt++; break;
             case RESOURCE_STONE:  stoneCnt++; break;
             case RESOURCE_GOLD:   goldCnt++; break;
@@ -463,12 +464,14 @@ void UsrAI::manageVillagers(const tagInfo& info)
             }
         }
         // ④ 打猎（补食物缺口）→ 种田 → 建农田
-        if (foodCnt < targetFood) {
+        //    总猎人上限 MAX_HUNTER_TOTAL：防止大批猎人追同一拨猎物互相卡住
+        if (foodCnt < targetFood && huntCnt < MAX_HUNTER_TOTAL) {
             int sn = findNearestHunt(info, f.SN);
             if (sn >= 0) {
                 HumanAction(f.SN, sn);
                 m_issued.insert(f.SN);
                 foodCnt++;
+                huntCnt++;
                 continue;
             }
             // 升级前不种田、不建农田（浆果/猎物撑到升级即可）
@@ -538,14 +541,18 @@ int UsrAI::findNearestFarm(const tagInfo& info, int farmerSN)
     return sn;
 }
 
-// 打猎：优先选"猎人最少"的活物（分散猎杀，避免扎堆盯一只），活物杀光后采尸
+// 打猎：分散猎杀，避免大批猎人扎堆同一只猎物互相卡住
+//   · 只统计"正在采/正在前往"该猎物的猎人（空闲农民 WorkObjectSN 有残留，不能算）
+//   · 每只活物最多 MAX_HUNTER_PER_PREY 人，每具尸体最多 1 人，满员不派
+//   · 全部满员/没有猎物 → 返回 -1（让农民去种田/砍树，不硬塞）
 int UsrAI::findNearestHunt(const tagInfo& info, int farmerSN)
 {
     (void)farmerSN;
-    // 统计每个猎物的猎人数量
+    // 统计每个猎物的猎人数量（WORKING=正在采，WALKING=正前往）
     std::unordered_map<int,int> cnt;
     for (const tagFarmer& f : info.farmers)
-        if (f.NowState != HUMAN_STATE_WORKING) cnt[f.WorkObjectSN]++;
+        if (f.NowState == HUMAN_STATE_WORKING || f.NowState == HUMAN_STATE_WALKING)
+            cnt[f.WorkObjectSN]++;
 
     std::vector<int> corpses, alives;
     for (const tagResource& r : info.resources) {
@@ -554,27 +561,29 @@ int UsrAI::findNearestHunt(const tagInfo& info, int farmerSN)
         if (r.Blood <= 0) corpses.push_back(r.SN);
         else alives.push_back(r.SN);
     }
-    // 选活物：优先猎人最少的（分散猎杀两拨羚羊）
+    // 选活物：优先猎人最少的（满员 2 人的不派 → 分散猎杀，防扎堆）
     if (!alives.empty()) {
-        int bestSn = alives[0];
+        int bestSn = -1;
         int bestCnt = 1e9;
         for (int sn : alives) {
             int c = cnt[sn];
+            if (c >= MAX_HUNTER_PER_PREY) continue;   // 已满员 → 换下一只
             if (c < bestCnt) { bestCnt = c; bestSn = sn; }
         }
-        return bestSn;
+        if (bestSn >= 0) return bestSn;
     }
-    // 采尸：优先采集人数最少的尸体
+    // 采尸：每具尸体最多 1 人（尸体只有一个采集位，多人会卡位）
     if (!corpses.empty()) {
-        int bestSn = corpses[0];
+        int bestSn = -1;
         int bestCnt = 1e9;
         for (int sn : corpses) {
             int c = cnt[sn];
+            if (c >= 1) continue;
             if (c < bestCnt) { bestCnt = c; bestSn = sn; }
         }
-        return bestSn;
+        if (bestSn >= 0) return bestSn;
     }
-    return -1;
+    return -1;   // 猎物都满员或没有 → 不派猎人
 }
 
 // 找最近指定类型的资源（返回资源 SN，找不到返回 -1）
@@ -696,10 +705,10 @@ void UsrAI::buildBuildings(const tagInfo& info)
                 built = true;
             }
         }
-        // 2) 箭塔（住房满后建 1 座，补防御）
+        // 2) 箭塔（住房满后建 1 座，补防御；第二、三座由 buildArrowTower 紧凑建造）
         else if (countBuilding(info, BUILDING_HOME) >= TARGET_HOUSE_NUM
             && m_researchCount[BUILDING_GRANARY_ARROWTOWER] > 0
-            && countBuilding(info, BUILDING_ARROWTOWER) < 2
+            && countBuilding(info, BUILDING_ARROWTOWER) < 1
             && info.Stone >= BUILD_ARROWTOWER_STONE) {
             int x, y;
             if (findBuildBlock(info, x, y, 2, 2)) {
@@ -1068,14 +1077,14 @@ void UsrAI::buildArrowTower(const tagInfo& info)
     // 前置：谷仓箭塔科技已研发
     if (m_researchCount[BUILDING_GRANARY_ARROWTOWER] == 0) return;
 
-    // 统计已有箭塔
+    // 统计已有箭塔（含建造中）
     int towerX = -1, towerY = -1, towerCount = 0;
     for (const tagBuilding& b : info.buildings) {
         if (b.Type != BUILDING_ARROWTOWER) continue;
         towerCount++;
         if (towerCount == 1) { towerX = b.BlockDR; towerY = b.BlockUR; }
     }
-    if (towerCount >= 2 || towerCount == 0) return;   // 已有两座 / 第一座还没建
+    if (towerCount >= 3 || towerCount == 0) return;   // 已有三座 / 第一座还没建
     if (info.Stone < BUILD_ARROWTOWER_STONE) return;  // 石头不足
 
     // 找一个空闲农民来建造
@@ -1084,41 +1093,60 @@ void UsrAI::buildArrowTower(const tagInfo& info)
         if (f.NowState != HUMAN_STATE_IDLE) continue;
         if (m_issued.count(f.SN)) continue;
 
-        // 第二座塔：在第一座塔周围 4 格内尝试多个方向（两塔不要离太远）
-        static const int OFF[4][2] = { {4,0}, {-4,0}, {0,4}, {0,-4} };
-        for (int d = 0; d < 4; ++d) {
-            int x, y;
-            if (findBuildBlock(info, x, y, 2, 2, towerX + OFF[d][0], towerY + OFF[d][1])) {
-                HumanBuild(f.SN, BUILDING_ARROWTOWER, x, y);
-                m_issued.insert(f.SN);
-                break;
+        // 第二座塔：第一座 +2 格（远离市中心方向）；第三座塔：第一座 -2 格（另一侧）
+        // 三座一字排开、间距 2 格（近，交叉火力覆盖）
+        int dirX = 1;
+        if (m_centerX >= 0 && towerX > m_centerX) dirX = -1;   // 远离市中心方向
+        int side = (towerCount == 1) ? 1 : -1;                 // 第二座正向、第三座反向
+        int baseX = towerX + dirX * 2 * side;
+        int candY[3] = { towerY, towerY - 2, towerY + 2 };     // 正对 / 上挪2格 / 下挪2格
+        for (int k = 0; k < 3; ++k) {
+            for (int dx = -2; dx <= 2; ++dx) {                 // 附近 ±2 格挪动
+                for (int dy = -2; dy <= 2; ++dy) {
+                    int bx = baseX + dx, by = candY[k] + dy;
+                    if (bx < 0 || by < 0 || bx + 2 > 100 || by + 2 > 100) continue;
+                    bool ok = true;
+                    for (int i = 0; i < 2 && ok; ++i)
+                        for (int j = 0; j < 2; ++j)
+                            if (m_map[bx + i][by + j] != 0) { ok = false; break; }
+                    // 高度一致（平地）
+                    if (ok && info.theMap != nullptr) {
+                        const auto& terrain = *info.theMap;
+                        int h = terrain[bx][by].height;
+                        if (terrain[bx + 1][by].height != h || terrain[bx][by + 1].height != h
+                            || terrain[bx + 1][by + 1].height != h) ok = false;
+                    }
+                    if (ok) {
+                        HumanBuild(f.SN, BUILDING_ARROWTOWER, bx, by);
+                        m_issued.insert(f.SN);
+                        return;   // 建好直接结束
+                    }
+                }
             }
         }
         break;
     }
 }
 
-// 计算祭司站位：双塔中点（向敌人来袭反侧偏移）> 单塔位置 > 市中心
+// 计算祭司站位：守在"远离敌人来袭方向的那座塔"下（任意塔数；无塔 → 市中心）
 void UsrAI::getPriestHome(const tagInfo& info, int& hx, int& hy) const
 {
     hx = m_centerX;
     hy = m_centerY;
-    int t1x = -1, t1y = -1;
+    int bestX = -1, bestY = -1;
+    double bestProj = 1e18;
     for (const tagBuilding& b : info.buildings) {
         if (b.Type != BUILDING_ARROWTOWER || b.Percent < 100) continue;
-        if (t1x < 0) { t1x = b.BlockDR; t1y = b.BlockUR; }
-        else {
-            hx = (t1x + b.BlockDR) / 2;
-            hy = (t1y + b.BlockUR) / 2;
-            // 向远离敌人来袭方向偏移 2 格（待在敌人进攻方向的反侧，躲塔后面）
-            hx -= m_enemyDirX * 2;
-            hy -= m_enemyDirY * 2;
-            if (hx < 0) hx = 0; if (hx > 99) hx = 99;
-            if (hy < 0) hy = 0; if (hy > 99) hy = 99;
-            return;
+        if (m_enemyDirX != 0 || m_enemyDirY != 0) {
+            // 选"离敌人来袭方向最远"的塔（塔相对市中心的投影最小 = 敌人反侧，最安全）
+            double d = (double)(b.BlockDR - m_centerX) * m_enemyDirX
+                     + (double)(b.BlockUR - m_centerY) * m_enemyDirY;
+            if (d < bestProj) { bestProj = d; bestX = b.BlockDR; bestY = b.BlockUR; }
+        } else if (bestX < 0) {
+            bestX = b.BlockDR; bestY = b.BlockUR;   // 未知敌人方向：选第一座塔
         }
     }
-    if (t1x >= 0) { hx = t1x; hy = t1y; }                                        // 单塔
+    if (bestX >= 0) { hx = bestX; hy = bestY; }     // 有塔 → 选好的塔下
 }
 
 // ============================================================
@@ -1268,6 +1296,86 @@ void UsrAI::defense(const tagInfo& info)
 }
 
 // ============================================================
+// 某格是否"静态障碍"（不能作为移动目标）：树/石/金/浆果丛/建筑/海洋
+//   单位（200=我方 300=敌方）不算障碍 —— 祭司要靠近转化目标，可下达
+//   动物资源不算障碍 —— 会移动，且可能被采集/猎杀
+//   未探索(-2) 按可走处理 —— 避免目标永远不可达
+// ============================================================
+bool UsrAI::isStaticBlock(int bx, int by) const
+{
+    if (bx < 0 || bx >= 100 || by < 0 || by >= 100) return true;
+    int v = m_map[bx][by];
+    if (v == -1) return true;                 // 海洋
+    if (v >= 100 && v < 200) return true;     // 建筑（100+类型）
+    if (v >= 200) return false;               // 单位（敌我）可下达
+    if (v >= 10 && v < 100) {                 // 资源（10+类型）
+        int t = v - 10;
+        if (t == RESOURCE_TREE || t == RESOURCE_STONE
+            || t == RESOURCE_GOLD || t == RESOURCE_BUSH) return true;  // 静态障碍
+        return false;                         // 动物（羚羊/大象/狮子）可走
+    }
+    return false;                             // 0 空地、-2 未探索：可走
+}
+
+// ============================================================
+// 目标格是静态障碍（如树木）→ 调整到周围最近的可达格
+//   环形搜索半径 1..8 格（曼哈顿距离优先），找到即返回
+//   全被堵则保持原目标（放弃调整，交给游戏寻路处理）
+// ============================================================
+void UsrAI::adjustReachableTarget(double& gx, double& gy) const
+{
+    int bx = (int)(gx / BLOCKSIDELENGTH + 0.5);   // 像素 → 最近块
+    int by = (int)(gy / BLOCKSIDELENGTH + 0.5);
+    if (!isStaticBlock(bx, by)) return;           // 目标格可下达，不用改
+
+    for (int r = 1; r <= 8; ++r) {                // 逐圈扩大（曼哈顿距离优先）
+        for (int dy = -r; dy <= r; ++dy) {
+            for (int dx = -r; dx <= r; ++dx) {
+                if (dx == 0 && dy == 0) continue;
+                int nx = bx + dx, ny = by + dy;
+                if (nx < 0 || nx >= 100 || ny < 0 || ny >= 100) continue;
+                if (!isStaticBlock(nx, ny)) {
+                    gx = (double)nx * BLOCKSIDELENGTH;
+                    gy = (double)ny * BLOCKSIDELENGTH;
+                    return;
+                }
+            }
+        }
+    }
+    // 8格内全堵：保持原目标
+}
+
+// ============================================================
+// 祭司节流移动：防止每帧重复下同一个移动指令
+//   问题：AI 每帧给祭司下移动令 → 移动/寻路不断被重置 → 永远到不了目标
+//         → 下一帧距离判断仍"没到" → 又下令（死循环，且挤掉转化指令）
+//   解决：
+//     ① 已到目标 1 格内 → 不下令（到位即停，不再重复发同一坐标）
+//     ② 60帧（2.4秒）内目标位置变化不超过 2 格 → 不重复下令
+//     ③ 只有目标大范围变化时才立即重新下令（追新目标）
+//     ④ 目标格是静态障碍（树木/建筑/海洋）→ 先调整到最近可达格再下达
+//   返回 true = 本帧已下令
+// ============================================================
+bool UsrAI::movePriest(int priestSN, double px, double py, double gx, double gy, int frame)
+{
+    // ④ 目标格是障碍（如树木挡路）→ 调整到周围最近可达格
+    adjustReachableTarget(gx, gy);
+    // ① 已到目标 1 格内 → 到位即停
+    if (calDistance(px, py, gx, gy) <= 1.0 * BLOCKSIDELENGTH) return false;
+    // ② 节流：60帧内且目标没大变 → 不下令
+    bool cool = (frame - m_priestMoveFrame < 60);
+    bool targetChanged = calDistance(m_priestMoveDR, m_priestMoveUR, gx, gy) > 2.0 * BLOCKSIDELENGTH;
+    if (cool && !targetChanged) return false;
+
+    HumanMove(priestSN, gx, gy);
+    m_priestMoveFrame = frame;
+    m_priestMoveDR = gx;
+    m_priestMoveUR = gy;
+    m_issued.insert(priestSN);
+    return true;
+}
+
+// ============================================================
 // 祭司行为：
 //   被威胁时：先撤退到"最近的塔旁"（贴塔站位，把敌人拉进塔射程）
 //             到位后再考虑转化（不原地站着挨打）
@@ -1285,62 +1393,74 @@ void UsrAI::handlePriest(const tagInfo& info)
     }
     if (priest == nullptr) return;                  // 祭司不存在（死亡=游戏失败）
 
-    // 1.5) 被攻击检测：血量比上一帧下降 → 判定正在挨打 → 立即微调走位
-    //      （即使正在转化或敌人较远，只要掉血就动，不站着挨打）
+    // 1.5) 被攻击检测：血量比上一帧下降 → 判定正在挨打
+    //      走位条件：有军队 +（血量低 <60% 或 没在转化）
+    //      转化中血量健康时不打断（转化受攻击不会自动断，是我们的走位打断了它）
     bool beingHit = (m_priestLastBlood > 0 && priest->Blood < m_priestLastBlood);
     m_priestLastBlood = priest->Blood;
-    if (beingHit) {
-        // 找最近的敌人（走位方向参照）
-        const tagArmy* threat = nullptr;
-        double nearestE = 1e18;
-        for (const tagArmy& e : info.enemy_armies) {
-            double d = calDistance(priest->DR, priest->UR, e.DR, e.UR);
-            if (d < nearestE) { nearestE = d; threat = &e; }
-        }
-        // 找最近的塔（没有则市中心）
-        int hx = m_centerX, hy = m_centerY;
-        double bestT = 1e18;
-        for (const tagBuilding& b : info.buildings) {
-            if (b.Type != BUILDING_ARROWTOWER || b.Percent < 100) continue;
-            double d = calDistance(priest->DR, priest->UR,
-                                   (double)b.BlockDR * BLOCKSIDELENGTH, (double)b.BlockUR * BLOCKSIDELENGTH);
-            if (d < bestT) { bestT = d; hx = b.BlockDR; hy = b.BlockUR; }
-        }
-        // 走位目标：塔 + 远离敌人方向 3 格（微调，把敌人拉进塔射程）
+    bool convertingNow = false;
+    for (const tagArmy& e : info.enemy_armies)
+        if (e.SN == priest->WorkObjectSN) { convertingNow = true; break; }
+    bool lowBlood = (priest->Blood < priest->MaxBlood * 3 / 5);
+    if (beingHit && !info.enemy_armies.empty() && (lowBlood || !convertingNow)) {
+        // 走位目标 = 固定安全位（塔下/市中心，getPriestHome）：挨打就往安全位撤，到位即停
+        // （不用"塔+敌人反方向偏移"——敌人位置每帧变 → 目标抖动 → 每帧重新下令）
+        int hx, hy;
+        getPriestHome(info, hx, hy);
         double gx = (double)hx * BLOCKSIDELENGTH;
         double gy = (double)hy * BLOCKSIDELENGTH;
-        if (threat != nullptr) {
-            double dx = priest->DR - threat->DR;
-            double dy = priest->UR - threat->UR;
-            double len = sqrt(dx * dx + dy * dy);
-            if (len > 0.1) {
-                gx += dx / len * 3.0 * BLOCKSIDELENGTH;
-                gy += dy / len * 3.0 * BLOCKSIDELENGTH;
-            }
-        }
-        // 防重复下令（目的地已是目标点则不再下令）
-        if (calDistance(priest->DR0, priest->UR0, gx, gy) > 1.0) {
-            HumanMove(priestSN, gx, gy);
-            m_issued.insert(priestSN);
-        }
-        return;   // 本帧已走位，不再转化/做别的
+        // 节流下令：60帧内目标不变不重复下令（防每帧打断移动/挤掉转化指令）
+        bool ordered = movePriest(priestSN, priest->DR, priest->UR, gx, gy, info.GameFrame);
+        if (ordered || lowBlood) return;   // 已下令，或血量低（保命优先）→ 本帧不再转化
+        // 血量健康且节流期内：不 return → 把本帧让给转化逻辑
     }
 
-    // 2) 寻找转化候选：优先战车弓兵（专杀祭司的，威胁最大），其次最近敌人
+    // 2) 寻找转化候选
+    //    优先远程兵（弓箭手/战车弓兵/复合弓兵/投石兵）：它们打祭司最危险且塔可能够不着，
+    //    祭司转化射程12格能覆盖（弓箭手射程5、战车弓兵7）→ 优先转化保命
+    //    保守阶段（未升级）：没有远程兵 → 塔射程内最近敌人
+    //    激进阶段（升级后）：没有远程兵 → 最近敌人
+    bool aggressive = (info.civilizationStage >= CIVILIZATION_BRONZEAGE
+                       || info.GameFrame > FRAME_WAVE1 + 3000);
     int target = -1;
-    double best = 1e18;
-    int chariotTarget = -1;
-    double bestC = 1e18;
+
+    // ① 优先远程兵（选最近的）
+    double bestR = 1e18;
     for (const tagArmy& e : info.enemy_armies) {
         if (e.Blood <= 0) continue;
+        if (e.Sort != AT_BOWMAN && e.Sort != AT_CHARIOT_ARCHER
+            && e.Sort != AT_COMPOSITE_BOWMAN && e.Sort != AT_SLINGER) continue;
         double d = calDistance(priest->DR, priest->UR, e.DR, e.UR);
-        if (e.Sort == AT_CHARIOT_ARCHER) {
-            if (d < bestC) { bestC = d; chariotTarget = e.SN; }
-        } else {
+        if (d < bestR) { bestR = d; target = e.SN; }
+    }
+    if (target >= 0) {
+        // 已选到远程兵
+    } else if (aggressive) {
+        // ② 激进：无远程兵 → 最近敌人
+        double best = 1e18;
+        for (const tagArmy& e : info.enemy_armies) {
+            if (e.Blood <= 0) continue;
+            double d = calDistance(priest->DR, priest->UR, e.DR, e.UR);
             if (d < best) { best = d; target = e.SN; }
         }
+    } else {
+        // ② 保守：无远程兵 → 塔射程内最近敌人
+        double bestD = 1e18;
+        for (const tagArmy& e : info.enemy_armies) {
+            if (e.Blood <= 0) continue;
+            bool inTowerRange = false;
+            for (const tagBuilding& b : info.buildings) {
+                if (b.Type != BUILDING_ARROWTOWER || b.Percent < 100) continue;
+                double d = calDistance(e.DR, e.UR,
+                                       (double)b.BlockDR * BLOCKSIDELENGTH, (double)b.BlockUR * BLOCKSIDELENGTH);
+                if (d <= DIS_ARROWTOWER * BLOCKSIDELENGTH) { inTowerRange = true; break; }
+            }
+            if (inTowerRange) {
+                double d = calDistance(priest->DR, priest->UR, e.DR, e.UR);
+                if (d < bestD) { bestD = d; target = e.SN; }
+            }
+        }
     }
-    if (chariotTarget >= 0) target = chariotTarget;   // 优先转化战车弓兵
 
     // 2.4) 检查祭司是否在箭塔保护范围内（距最近塔 <= 6 格）——转化必须在塔下进行
     bool nearTower = false;
@@ -1351,14 +1471,13 @@ void UsrAI::handlePriest(const tagInfo& info)
         if (d <= 6.0 * BLOCKSIDELENGTH) { nearTower = true; break; }
     }
 
-    // 2.5) 转化节流：同一目标下令一次后，120 帧（约5秒）内不重复下令
-    //      （AI线程与主线程并行，游戏快照滞后，WorkObjectSN 判断不可靠，
-    //       每帧重复下令会不断重置转化关系，导致转化永不完成）
+    // 2.5) 转化节流：120 帧内只下一次转化令（无论目标是否变化）
+    //      （之前"同目标120帧"有漏洞：目标一变（列表打乱/距离抖动）就绕过节流，
+    //        导致每帧切换目标、转化永不完成）
     bool needConvertOrder = false;
     if (target >= 0 && priest->ConvertCooldown <= 0 && nearTower) {
-        bool sameTarget = (target == m_convertTarget);
         bool tooSoon = (m_convertStartFrame >= 0 && info.GameFrame - m_convertStartFrame < 120);
-        needConvertOrder = !sameTarget || !tooSoon;   // 新目标 或 旧目标超时重试
+        needConvertOrder = !tooSoon;   // 120帧内不再下令，转化持续完成
     }
 
     // 3) 有转化目标且节流通过 → 主动转化（敌人打别人时也转化，不等敌人打自己）
@@ -1380,7 +1499,8 @@ void UsrAI::handlePriest(const tagInfo& info)
         if (d < nearest) { nearest = d; threat = &e; }
     }
 
-    // 5) 有其他威胁（非转化目标）→ 绕塔走位
+    // 5) 有其他威胁（非转化目标）→ 贴塔走位
+    //    目标 = 最近塔坐标（固定值，不用"塔+敌人反方向"——敌人位置每帧变 → 目标抖动 → 每帧重新下令）
     if (threat != nullptr && nearest < threatDist) {
         // 找最近的已建成箭塔（没有则市中心）
         int hx = m_centerX, hy = m_centerY;
@@ -1391,37 +1511,17 @@ void UsrAI::handlePriest(const tagInfo& info)
                                    (double)b.BlockDR * BLOCKSIDELENGTH, (double)b.BlockUR * BLOCKSIDELENGTH);
             if (d < bestT) { bestT = d; hx = b.BlockDR; hy = b.BlockUR; }
         }
-        // 目标 = 塔 + 远离威胁敌人的方向 3 格（绕到塔的敌人反侧）
-        double dx = priest->DR - threat->DR;
-        double dy = priest->UR - threat->UR;
-        double len = sqrt(dx * dx + dy * dy);
-        double gx, gy;
-        if (len > 0.1) {
-            gx = (double)hx * BLOCKSIDELENGTH + dx / len * 3.0 * BLOCKSIDELENGTH;
-            gy = (double)hy * BLOCKSIDELENGTH + dy / len * 3.0 * BLOCKSIDELENGTH;
-        } else {
-            gx = (double)hx * BLOCKSIDELENGTH;
-            gy = (double)hy * BLOCKSIDELENGTH;
-        }
-        // 防重复下令（目的地已是目标点则不再下令）
-        if (calDistance(priest->DR0, priest->UR0, gx, gy) > 1.0) {
-            HumanMove(priestSN, gx, gy);
-            m_issued.insert(priestSN);
-        }
+        // 节流下令（60帧内目标不变不重复；到位即停）
+        movePriest(priestSN, priest->DR, priest->UR, (double)hx * BLOCKSIDELENGTH, (double)hy * BLOCKSIDELENGTH, info.GameFrame);
         return;
     }
 
-    // 6) 无威胁且无转化目标：不在塔下 → 回塔下待命
+    // 6) 无威胁且无转化目标：不在塔下 → 回塔下待命（节流下令）
     if (!nearTower && info.GameFrame > FRAME_WAVE1 - 2000) {
         int hx, hy;
         getPriestHome(info, hx, hy);
         if (hx >= 0) {
-            double homeDR = (double)hx * BLOCKSIDELENGTH;
-            double homeUR = (double)hy * BLOCKSIDELENGTH;
-            if (calDistance(priest->DR0, priest->UR0, homeDR, homeUR) > 1.0) {
-                HumanMove(priestSN, homeDR, homeUR);
-                m_issued.insert(priestSN);
-            }
+            movePriest(priestSN, priest->DR, priest->UR, (double)hx * BLOCKSIDELENGTH, (double)hy * BLOCKSIDELENGTH, info.GameFrame);
         }
     }
 }
@@ -1456,8 +1556,9 @@ void UsrAI::processData()
     manageVillagers(info);          // 农民工作分配（食物优先，动态配额）
     researchTech(info);             // 科技链：谷仓/市场/仓库/兵营/靶场
     trainArmy(info);                // 训练军队（铜器后按 PPT 规划兵种）
-    if (info.civilizationStage >= CIVILIZATION_BRONZEAGE) {
-        buildArrowTower(info);      // 第二座箭塔：升级铜器后再造（升级前集中资源发展）
+    // 第二、三座箭塔：铜器后建，或第二波前 3000 帧就开始建（保证第二波前 3 座塔就位）
+    if (info.civilizationStage >= CIVILIZATION_BRONZEAGE || info.GameFrame > FRAME_WAVE2 - 3000) {
+        buildArrowTower(info);      // 第二座 +3格 / 第三座 -3格（三座一字排开、间距近）
     }
     defense(info);                  // 箭塔"拉仇恨"：优先攻击满血敌人
     handlePriest(info);             // 祭司：贴塔拉怪/转化（优先于探路）

@@ -49,6 +49,8 @@ private:
     bool findBuildBlock(const tagInfo& info, int& x, int& y, int w, int h, int nearX = -1, int nearY = -1); // 找 w×h 可建空地（可指定附近位置）
 
     // ===== 经济：农民工作分配 =====
+    static const int MAX_HUNTER_TOTAL = 5;        // 打猎总人数上限（防大批猎人扎堆互相卡住）
+    static const int MAX_HUNTER_PER_PREY = 2;     // 每只活物最多猎人（分散猎杀）
     std::set<int> m_issued;                      // 本帧已下令的对象 SN（防重复下令）
     int m_builderSN = -1;                        // 专职建造村民 SN（保证建筑能建起来）
     std::unordered_map<int,int> m_moveStart;     // 农民SN -> 开始移动帧（寻路卡住检测）
@@ -74,6 +76,11 @@ private:
     int m_convertTarget = -1;                    // 上次转化目标 SN（转化节流用）
     int m_convertStartFrame = -1;                // 上次转化下令帧（转化节流用）
     int m_priestLastBlood = -1;                  // 祭司上一帧血量（被攻击检测用）
+    int m_priestMoveFrame = -9999;               // 上次祭司移动下令帧（移动节流用）
+    double m_priestMoveDR = 0, m_priestMoveUR = 0; // 上次移动目标（移动节流用）
+    bool movePriest(int priestSN, double px, double py, double gx, double gy, int frame); // 祭司节流移动：到位即停+60帧节流
+    bool isStaticBlock(int bx, int by) const;                 // 某格是否静态障碍（树/建筑/海洋；单位不算）
+    void adjustReachableTarget(double& gx, double& gy) const; // 目标格是障碍 → 调整到最近可达格
     void buildArrowTower(const tagInfo& info);   // 建造第二座箭塔（与第一座形成交叉火力）
     void getPriestHome(const tagInfo& info, int& hx, int& hy) const; // 祭司站位：双塔中点>单塔>市中心
     std::unordered_map<int,int> m_towerSwitch;   // 箭塔SN -> 上次下令帧（切换节流，防频繁切换不射击）
