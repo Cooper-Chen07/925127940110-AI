@@ -521,21 +521,15 @@ void UsrAI::manageVillagers(const tagInfo& info)
                 continue;
             }
         }
-        // ⑦ 兜底：普通农民打猎或砍树（不闲置）；专属食物采集者只找食物（打猎/采尸）
-        if (!isFood) {
-            int sn = findNearestResource(info, RESOURCE_GAZELLE, f.SN);
-            if (sn < 0) sn = findNearestResource(info, RESOURCE_TREE, f.SN);
-            if (sn >= 0) {
-                HumanAction(f.SN, sn);
-                m_issued.insert(f.SN);
-            }
-        } else {
-            // 专属食物采集者：浆果没了 → 找已探明的其他食物（猎物尸体/羚羊）
-            int sn = findNearestHunt(info, f.SN);
-            if (sn >= 0) {
-                HumanAction(f.SN, sn);
-                m_issued.insert(f.SN);
-            }
+        // ⑦ 兜底：农民不闲置
+        //    普通农民：打猎或砍树
+        //    专属食物采集者：先找安全食物（打猎/采尸）；打不了（如大象人数不足/猎物满员）
+        //    → 也去砍树/挖资源——宁可干别的也不站着等（防"空闲村民不动"）
+        int sn = findNearestHunt(info, f.SN);
+        if (sn < 0) sn = findNearestResource(info, RESOURCE_TREE, f.SN);
+        if (sn >= 0) {
+            HumanAction(f.SN, sn);
+            m_issued.insert(f.SN);
         }
     }
 }
@@ -559,20 +553,25 @@ int UsrAI::findNearestFarm(const tagInfo& info, int farmerSN)
     return sn;
 }
 
-// 打猎：分散猎杀，避免大批猎人扎堆同一只猎物互相卡住
+// 打猎：分猎物类型差异化策略，防村民被大象打死
 //   · 只统计"正在采/正在前往"该猎物的猎人（空闲农民 WorkObjectSN 有残留，不能算）
-//   · 活物：每只最多 MAX_HUNTER_PER_PREY 人（两两一组打羚羊）
+//   · 羚羊/狮子：安全猎物，两两一组（MAX_HUNTER_PER_PREY=2），优先打完
+//   · 大象：危险（攻10，村民25血3下死），必须多人合作：
+//       - 已有羚羊/狮子没打完 → 先不打大象（安全优先）
+//       - 打大象：凑足 3 人以上才开打（1-2人去=送死）；最多 4 人集火
 //   · 尸体按体型放宽：大象(300食物) 最多 3 人采，羚羊(150) 最多 2 人，狮子(100) 1 人
-//     （多人采大象效率更高，PPT 建议；尸体上限太小 → 猎人打完站旁边发呆）
-//   · 全部满员/没有猎物 → 返回 -1（让农民去种田/砍树，不硬塞）
+//   · 全部满员/没有可安全打的猎物 → 返回 -1（农民去砍树/种田，不站着发呆）
 int UsrAI::findNearestHunt(const tagInfo& info, int farmerSN)
 {
     (void)farmerSN;
     // 统计每个猎物的猎人数量（WORKING=正在采，WALKING=正前往）
     std::unordered_map<int,int> cnt;
-    for (const tagFarmer& f : info.farmers)
+    int idleFarmers = 0;   // 空闲农民数（判断能否凑足人打大象）
+    for (const tagFarmer& f : info.farmers) {
         if (f.NowState == HUMAN_STATE_WORKING || f.NowState == HUMAN_STATE_WALKING)
             cnt[f.WorkObjectSN]++;
+        else if (f.NowState == HUMAN_STATE_IDLE) idleFarmers++;
+    }
 
     std::vector<int> corpses, alives;
     for (const tagResource& r : info.resources) {
@@ -581,18 +580,46 @@ int UsrAI::findNearestHunt(const tagInfo& info, int farmerSN)
         if (r.Blood <= 0) corpses.push_back(r.SN);
         else alives.push_back(r.SN);
     }
-    // 选活物：优先猎人最少的（满员 2 人的不派 → 分散猎杀，防扎堆）
-    if (!alives.empty()) {
-        int bestSn = -1;
-        int bestCnt = 1e9;
-        for (int sn : alives) {
-            int c = cnt[sn];
-            if (c >= MAX_HUNTER_PER_PREY) continue;   // 已满员 → 换下一只
-            if (c < bestCnt) { bestCnt = c; bestSn = sn; }
-        }
-        if (bestSn >= 0) return bestSn;
+
+    // ① 优先羚羊/狮子（安全猎物）：两两一组，猎人最少的优先
+    //    （大象不在这一轮——羚羊没打完就不打大象）
+    int safeBestSn = -1;
+    int safeBestCnt = 1e9;
+    for (int sn : alives) {
+        const tagResource* rr = nullptr;
+        for (const tagResource& r : info.resources)
+            if (r.SN == sn) { rr = &r; break; }
+        if (rr == nullptr) continue;
+        if (rr->Type == RESOURCE_ELEPHANT) continue;      // 大象单独处理
+        int c = cnt[sn];
+        if (c >= MAX_HUNTER_PER_PREY) continue;           // 已满员 → 换下一只
+        if (c < safeBestCnt) { safeBestCnt = c; safeBestSn = sn; }
     }
-    // 采尸：按体型放宽上限（大象多人采效率高；羚羊2人、狮子1人）
+    if (safeBestSn >= 0) return safeBestSn;
+
+    // ② 羚羊/狮子都满员或没有了 → 才考虑大象
+    //    大象必须多人集火：至少 3 人（含已在打/前往的）才安全；不足 3 人不开打（防送死）
+    //    已有人开打（c>=1）→ 补员到最多 4 人；没人打（c==0）且空闲农民 <3 → 也不开
+    if (!alives.empty()) {
+        int eleBestSn = -1;
+        int eleBestCnt = 1e9;
+        bool anyElephant = false;
+        for (int sn : alives) {
+            const tagResource* rr = nullptr;
+            for (const tagResource& r : info.resources)
+                if (r.SN == sn) { rr = &r; break; }
+            if (rr == nullptr || rr->Type != RESOURCE_ELEPHANT) continue;
+            anyElephant = true;
+            int c = cnt[sn];
+            // 补员规则：c>=4 已够；c==0 且空闲农民不足 3 → 不开新局（人等够了再说）
+            if (c >= 4) continue;
+            if (c == 0 && idleFarmers < 3) continue;
+            if (c < eleBestCnt) { eleBestCnt = c; eleBestSn = sn; }
+        }
+        if (anyElephant && eleBestSn >= 0) return eleBestSn;
+    }
+
+    // ③ 采尸：按体型放宽上限（大象多人采效率高；羚羊2人、狮子1人）
     if (!corpses.empty()) {
         int bestSn = -1;
         int bestCnt = 1e9;
@@ -606,7 +633,7 @@ int UsrAI::findNearestHunt(const tagInfo& info, int farmerSN)
         }
         if (bestSn >= 0) return bestSn;
     }
-    return -1;   // 猎物都满员或没有 → 不派猎人
+    return -1;   // 没有可安全打的猎物 → 农民去砍树/种田，不硬塞
 }
 
 // 找最近指定类型的资源（返回资源 SN，找不到返回 -1）
@@ -722,6 +749,8 @@ void UsrAI::buildBuildings(const tagInfo& info)
                 if (f.FarmerSort != FARMERTYPE_FARMER) continue;
                 if (f.NowState != HUMAN_STATE_IDLE) continue;
                 if (m_issued.count(f.SN)) continue;
+                if (f.SN == m_builderSN) continue;          // 第一轮已用专职建造者
+                if (f.SN == m_depotBuilderSN) continue;     // 资源点建造者不抽调（专职建仓库/谷仓）
                 builder = f.SN;
                 break;
             }
@@ -820,23 +849,15 @@ void UsrAI::buildBuildings(const tagInfo& info)
 }
 
 // ============================================================
-// 资源点仓库/谷仓：由采集者（任意空闲农民）负责建造
-// 专职建造者专注基地建筑；资源点建筑就近交给采集的农民
+// 资源点仓库/谷仓：固定 1 个"资源点建造者"负责（m_depotBuilderSN）
+//   · 不再依赖"随机空闲农民"（经济满员时没人空闲 → 远处仓库永远建不出来）
+//   · 建完仓库/谷仓后 → 就地采集最近的浆果/猎物（正好投入采集，食物就近存放）
+//   · 建造中由本函数跨帧跟踪，不被其他模块重新分配
 // ============================================================
 void UsrAI::buildResourceDepots(const tagInfo& info)
 {
-    // 找任意空闲农民（采集者）
-    int builder = -1;
-    for (const tagFarmer& f : info.farmers) {
-        if (f.FarmerSort != FARMERTYPE_FARMER) continue;
-        if (f.NowState != HUMAN_STATE_IDLE) continue;
-        if (m_issued.count(f.SN)) continue;
-        builder = f.SN;
-        break;
-    }
-    if (builder == -1) return;
-
-    // 1) 羚羊堆旁仓库（猎物 ≥3 时，打猎食物就近存放）
+    // ---- 判断是否需要建仓 ----
+    // 1) 羚羊堆旁仓库（猎物 ≥3 且仓库不足 2）
     int animalCnt = 0;
     double ax = 0, ay = 0;
     for (const tagResource& r : info.resources) {
@@ -846,17 +867,9 @@ void UsrAI::buildResourceDepots(const tagInfo& info)
         ax += r.DR;
         ay += r.UR;
     }
-    if (animalCnt >= 3 && countBuilding(info, BUILDING_STOCK) < 2 && info.Wood >= BUILD_STOCK_WOOD) {
-        int gx = (int)(ax / animalCnt / BLOCKSIDELENGTH);
-        int gy = (int)(ay / animalCnt / BLOCKSIDELENGTH);
-        int x, y;
-        if (findBuildBlock(info, x, y, 3, 3, gx, gy)) {
-            HumanBuild(builder, BUILDING_STOCK, x, y);
-            m_issued.insert(builder);
-            return;
-        }
-    }
-    // 2) 浆果堆旁谷仓（浆果丛 ≥3 且离现有谷仓远时，就近存放浆果食物）
+    bool needStock = (animalCnt >= 3 && countBuilding(info, BUILDING_STOCK) < 2
+                      && info.Wood >= BUILD_STOCK_WOOD);
+    // 2) 浆果堆旁谷仓（浆果 ≥3 且离现有谷仓远）
     int berryCnt2 = 0;
     double bx = 0, by = 0;
     for (const tagResource& r : info.resources) {
@@ -865,10 +878,9 @@ void UsrAI::buildResourceDepots(const tagInfo& info)
         bx += r.DR;
         by += r.UR;
     }
-    if (berryCnt2 >= 3 && countBuilding(info, BUILDING_GRANARY) < 2 && info.Wood >= BUILD_GRANARY_WOOD) {
-        int gx = (int)(bx / berryCnt2 / BLOCKSIDELENGTH);
-        int gy = (int)(by / berryCnt2 / BLOCKSIDELENGTH);
-        // 所有浆果丛距最近谷仓都 <=6 格（如开局谷仓就在浆果丛旁）→ 不用建新谷仓
+    bool needGranary = false;
+    if (berryCnt2 >= 3 && countBuilding(info, BUILDING_GRANARY) < 2
+        && info.Wood >= BUILD_GRANARY_WOOD) {
         double maxBerryDist = 0;
         for (const tagResource& r : info.resources) {
             if (r.Type != RESOURCE_BUSH || r.Cnt <= 0) continue;
@@ -881,14 +893,66 @@ void UsrAI::buildResourceDepots(const tagInfo& info)
             }
             if (minD > maxBerryDist) maxBerryDist = minD;
         }
-        if (maxBerryDist > 6.0 * BLOCKSIDELENGTH) {
-            int x, y;
-            if (findBuildBlock(info, x, y, 3, 3, gx, gy)) {
-                HumanBuild(builder, BUILDING_GRANARY, x, y);
-                m_issued.insert(builder);
-            }
+        needGranary = (maxBerryDist > 6.0 * BLOCKSIDELENGTH);
+    }
+    // 没有任何要建的 + 没在役建造者 → 直接结束
+    if (!needStock && !needGranary && m_depotBuilderSN < 0) return;
+
+    // ---- 建造者状态机 ----
+    const tagFarmer* builder = nullptr;
+    if (m_depotBuilderSN >= 0) {
+        for (const tagFarmer& f : info.farmers)
+            if (f.SN == m_depotBuilderSN) { builder = &f; break; }
+        if (builder == nullptr) m_depotBuilderSN = -1;   // 建造者死亡/消失 → 重新挑
+    }
+    if (m_depotBuilderSN < 0) {
+        // 需要建仓时才挑人（不需要建则不占农民）
+        if (!needStock && !needGranary) return;
+        for (const tagFarmer& f : info.farmers) {
+            if (f.FarmerSort != FARMERTYPE_FARMER) continue;
+            if (f.NowState != HUMAN_STATE_IDLE) continue;
+            if (m_issued.count(f.SN)) continue;
+            if (f.SN == m_builderSN) continue;              // 不占用基地专职建造者
+            m_depotBuilderSN = f.SN;
+            builder = &f;
+            break;
+        }
+        if (builder == nullptr) return;                     // 实在没有空闲农民 → 下帧再试
+    }
+
+    // 建造者正在建造/行走（非空闲）→ 不打扰，等建完
+    if (builder->NowState != HUMAN_STATE_IDLE) return;
+
+    // ---- 空闲状态：优先派他去建仓库/谷仓 ----
+    if (needStock) {
+        int gx = (int)(ax / animalCnt / BLOCKSIDELENGTH);
+        int gy = (int)(ay / animalCnt / BLOCKSIDELENGTH);
+        int x, y;
+        if (findBuildBlock(info, x, y, 3, 3, gx, gy)) {
+            HumanBuild(m_depotBuilderSN, BUILDING_STOCK, x, y);
+            m_issued.insert(m_depotBuilderSN);
+            return;
         }
     }
+    if (needGranary) {
+        int gx = (int)(bx / berryCnt2 / BLOCKSIDELENGTH);
+        int gy = (int)(by / berryCnt2 / BLOCKSIDELENGTH);
+        int x, y;
+        if (findBuildBlock(info, x, y, 3, 3, gx, gy)) {
+            HumanBuild(m_depotBuilderSN, BUILDING_GRANARY, x, y);
+            m_issued.insert(m_depotBuilderSN);
+            return;
+        }
+    }
+
+    // ---- 没有要建的了 → 建完收尾：就地采集最近的浆果/猎物，然后释放回普通农民 ----
+    int sn = findNearestResource(info, RESOURCE_BUSH, m_depotBuilderSN);
+    if (sn < 0) sn = findNearestHunt(info, m_depotBuilderSN);
+    if (sn >= 0) {
+        HumanAction(m_depotBuilderSN, sn);
+        m_issued.insert(m_depotBuilderSN);
+    }
+    m_depotBuilderSN = -1;   // 释放：下帧由 manageVillagers 正常管理（已下采集令，本帧不重分配）
 }
 
 // ============================================================
