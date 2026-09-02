@@ -49,8 +49,8 @@ private:
     bool findBuildBlock(const tagInfo& info, int& x, int& y, int w, int h, int nearX = -1, int nearY = -1); // 找 w×h 可建空地（可指定附近位置）
 
     // ===== 经济：农民工作分配 =====
-    static const int MAX_HUNTER_TOTAL = 5;        // 打猎总人数上限（防大批猎人扎堆互相卡住）
-    static const int MAX_HUNTER_PER_PREY = 2;     // 每只活物最多猎人（分散猎杀）
+    static const int MAX_HUNTER_PER_PREY = 2;     // 每只活物最多猎人（两两一组分散猎杀）
+    std::set<int> m_foodGatherers;               // 专属食物采集者（浆果/打猎）：只做食物，干完自动找下一个食物资源
     std::set<int> m_issued;                      // 本帧已下令的对象 SN（防重复下令）
     int m_builderSN = -1;                        // 专职建造村民 SN（保证建筑能建起来）
     std::unordered_map<int,int> m_moveStart;     // 农民SN -> 开始移动帧（寻路卡住检测）

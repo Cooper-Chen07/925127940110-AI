@@ -382,6 +382,9 @@ void UsrAI::manageVillagers(const tagInfo& info)
         if (f.FarmerSort != FARMERTYPE_FARMER) continue;
         if (f.SN == m_builderSN) continue;              // 专职建造者不参与采集（由 buildBuildings 调度）
         if (m_issued.count(f.SN)) continue;
+        bool isFood = (m_foodGatherers.count(f.SN) > 0) && !bronze;
+        //  专属食物采集者（浆果/打猎）：只做食物（浆果→打猎→种田）
+        //  升级铜器后专属标记失效 → 除专职建造工外所有农民重新分配任务（挖金/砍树/种田）
 
         // 非空闲农民：检查工作目标是否仍然有效（存在且有剩余），并检测寻路卡住
         if (f.NowState != HUMAN_STATE_IDLE) {
@@ -426,8 +429,9 @@ void UsrAI::manageVillagers(const tagInfo& info)
             // 目标失效或卡住 → 掉下去重新分配（新指令覆盖旧目标）
         }
 
-        // ① 浆果：优先选"采集人数最少"的丛（避免扎堆，尽快采完所有浆果）
-        if (berryExists && berryCnt < 12) {
+        // ① 浆果：开局 4 人 + 第一波前新增 4 人（共 8 人），选"采集人数最少"的丛分散采
+        //    采浆果的农民标记为专属食物采集者（浆果采完自动找下一个食物资源）
+        if (berryExists && berryCnt < 8) {
             int bestSn = -1;
             int bestCnt = 1e9;
             for (const tagResource& r : info.resources) {
@@ -438,13 +442,14 @@ void UsrAI::manageVillagers(const tagInfo& info)
             if (bestSn >= 0) {
                 HumanAction(f.SN, bestSn);
                 m_issued.insert(f.SN);
+                m_foodGatherers.insert(f.SN);   // 标记专属食物采集
                 berryCnt++;
                 foodCnt++;
                 continue;
             }
         }
-        // ② 木头（正常2人，按需动态）
-        if (woodCnt < targetWood) {
+        // ② 木头（正常2人，按需动态）；专属食物采集者不砍树（只做食物）
+        if (!isFood && woodCnt < targetWood) {
             int sn = findNearestResource(info, RESOURCE_TREE, f.SN);
             if (sn >= 0) {
                 HumanAction(f.SN, sn);
@@ -453,8 +458,8 @@ void UsrAI::manageVillagers(const tagInfo& info)
                 continue;
             }
         }
-        // ③ 石头（1人）
-        if (stoneCnt < targetStone) {
+        // ③ 石头（1人）；专属食物采集者不挖石
+        if (!isFood && stoneCnt < targetStone) {
             int sn = findNearestResource(info, RESOURCE_STONE, f.SN);
             if (sn >= 0) {
                 HumanAction(f.SN, sn);
@@ -463,13 +468,16 @@ void UsrAI::manageVillagers(const tagInfo& info)
                 continue;
             }
         }
-        // ④ 打猎（补食物缺口）→ 种田 → 建农田
-        //    总猎人上限 MAX_HUNTER_TOTAL：防止大批猎人追同一拨猎物互相卡住
-        if (foodCnt < targetFood && huntCnt < MAX_HUNTER_TOTAL) {
+        // ④ 打猎 → 种田 → 建农田
+        //    专属食物采集者无条件做食物（浆果采完/猎物打完自动流转找下一个食物）；
+        //    未升级时：所有空闲农民都优先采食物（尽快采完地图食物，不跑去砍树）；
+        //    升级后：普通农民只在食物缺口时补位打猎（打猎也标记为专属，两两一组分散猎杀）
+        if (isFood || !bronze || foodCnt < targetFood) {
             int sn = findNearestHunt(info, f.SN);
             if (sn >= 0) {
                 HumanAction(f.SN, sn);
                 m_issued.insert(f.SN);
+                m_foodGatherers.insert(f.SN);   // 打猎也标记专属
                 foodCnt++;
                 huntCnt++;
                 continue;
@@ -481,6 +489,7 @@ void UsrAI::manageVillagers(const tagInfo& info)
                 if (farmSN >= 0) {
                     HumanAction(f.SN, farmSN);
                     m_issued.insert(f.SN);
+                    m_foodGatherers.insert(f.SN);
                     foodCnt++;
                     continue;
                 }
@@ -502,8 +511,8 @@ void UsrAI::manageVillagers(const tagInfo& info)
                 }
             }
         }
-        // ⑤ 黄金（铜器后）
-        if (goldCnt < targetGold) {
+        // ⑤ 黄金（铜器后）；专属食物采集者不挖金
+        if (!isFood && goldCnt < targetGold) {
             int sn = findNearestResource(info, RESOURCE_GOLD, f.SN);
             if (sn >= 0) {
                 HumanAction(f.SN, sn);
@@ -512,12 +521,21 @@ void UsrAI::manageVillagers(const tagInfo& info)
                 continue;
             }
         }
-        // ⑦ 兜底：打猎或砍树（农民不闲置）
-        int sn = findNearestResource(info, RESOURCE_GAZELLE, f.SN);
-        if (sn < 0) sn = findNearestResource(info, RESOURCE_TREE, f.SN);
-        if (sn >= 0) {
-            HumanAction(f.SN, sn);
-            m_issued.insert(f.SN);
+        // ⑦ 兜底：普通农民打猎或砍树（不闲置）；专属食物采集者只找食物（打猎/采尸）
+        if (!isFood) {
+            int sn = findNearestResource(info, RESOURCE_GAZELLE, f.SN);
+            if (sn < 0) sn = findNearestResource(info, RESOURCE_TREE, f.SN);
+            if (sn >= 0) {
+                HumanAction(f.SN, sn);
+                m_issued.insert(f.SN);
+            }
+        } else {
+            // 专属食物采集者：浆果没了 → 找已探明的其他食物（猎物尸体/羚羊）
+            int sn = findNearestHunt(info, f.SN);
+            if (sn >= 0) {
+                HumanAction(f.SN, sn);
+                m_issued.insert(f.SN);
+            }
         }
     }
 }
@@ -543,7 +561,9 @@ int UsrAI::findNearestFarm(const tagInfo& info, int farmerSN)
 
 // 打猎：分散猎杀，避免大批猎人扎堆同一只猎物互相卡住
 //   · 只统计"正在采/正在前往"该猎物的猎人（空闲农民 WorkObjectSN 有残留，不能算）
-//   · 每只活物最多 MAX_HUNTER_PER_PREY 人，每具尸体最多 1 人，满员不派
+//   · 活物：每只最多 MAX_HUNTER_PER_PREY 人（两两一组打羚羊）
+//   · 尸体按体型放宽：大象(300食物) 最多 3 人采，羚羊(150) 最多 2 人，狮子(100) 1 人
+//     （多人采大象效率更高，PPT 建议；尸体上限太小 → 猎人打完站旁边发呆）
 //   · 全部满员/没有猎物 → 返回 -1（让农民去种田/砍树，不硬塞）
 int UsrAI::findNearestHunt(const tagInfo& info, int farmerSN)
 {
@@ -572,14 +592,17 @@ int UsrAI::findNearestHunt(const tagInfo& info, int farmerSN)
         }
         if (bestSn >= 0) return bestSn;
     }
-    // 采尸：每具尸体最多 1 人（尸体只有一个采集位，多人会卡位）
+    // 采尸：按体型放宽上限（大象多人采效率高；羚羊2人、狮子1人）
     if (!corpses.empty()) {
         int bestSn = -1;
         int bestCnt = 1e9;
-        for (int sn : corpses) {
-            int c = cnt[sn];
-            if (c >= 1) continue;
-            if (c < bestCnt) { bestCnt = c; bestSn = sn; }
+        for (const tagResource& r : info.resources) {
+            if (r.Blood > 0 || r.Cnt <= 0) continue;
+            if (r.Type != RESOURCE_GAZELLE && r.Type != RESOURCE_ELEPHANT && r.Type != RESOURCE_LION) continue;
+            int c = cnt[r.SN];
+            int cap = (r.Type == RESOURCE_ELEPHANT) ? 3 : (r.Type == RESOURCE_GAZELLE ? 2 : 1);
+            if (c >= cap) continue;
+            if (c < bestCnt) { bestCnt = c; bestSn = r.SN; }
         }
         if (bestSn >= 0) return bestSn;
     }
@@ -624,17 +647,23 @@ int UsrAI::countArmy(const tagInfo& info, int sort) const
 }
 
 // ============================================================
-// 市镇中心：升级铜器（优先）→ 持续生产农民到 20
+// 市镇中心：升级铜器（优先）→ 分阶段生产农民
+// 农民节奏：第一波前 12（开局8+新4采浆果）→ 第二波前 16（再新4打猎）→ 之后 20
 // 升级条件：市场/靶场/马厩 已建 2 个 + 800 食物（升级优先，保证按时升铜器）
 // ============================================================
 void UsrAI::manageCenter(const tagInfo& info)
 {
+    // 分阶段农民目标：第一波前 12，第二波前 16，之后 20（配合专属食物采集方案）
+    int farmerTarget = TARGET_FARMER_NUM;
+    if (info.GameFrame < FRAME_WAVE1) farmerTarget = 12;
+    else if (info.GameFrame < FRAME_WAVE2) farmerTarget = 16;
+
     for (const tagBuilding& b : info.buildings) {
         if (b.Type != BUILDING_CENTER) continue;
         if (b.Percent < 100 || b.Project != ACT_NULL) continue;   // 建造中或正在生产
         if (m_issued.count(b.SN)) continue;                        // 本帧已下令
 
-        // 1) 升级铜器（优先：保证 6000 帧前升完，第一波用铜器兵/科技防守）
+        // 1) 升级铜器（最高优先：保证第二波前升完，避免第二波损失农民后补人口吃掉升级食物）
         if (info.civilizationStage < CIVILIZATION_BRONZEAGE
             && canUpgradeBronze(info)
             && info.Meat >= BUILDING_CENTER_UPGRADE_BRONZEAGE_FOOD) {
@@ -642,9 +671,13 @@ void UsrAI::manageCenter(const tagInfo& info)
             m_issued.insert(b.SN);
             return;     // 本帧中心只做一件事
         }
-        // 2) 生产农民（未升级时造到 20；升级后不再造，食物/黄金全力投入造兵防守第二波）
-        if (info.civilizationStage < CIVILIZATION_BRONZEAGE
-            && (int)info.farmers.size() < TARGET_FARMER_NUM
+        // 2) 生产农民：仅当升级建筑还没建齐时补农民（建齐后停补，全力攒 800 食物升级）
+        //    升级后不再造农民，食物/黄金全力投入造兵防守第二波
+        bool upgradeBuildingReady = (info.civilizationStage < CIVILIZATION_BRONZEAGE
+                                     && canUpgradeBronze(info));
+        if (!upgradeBuildingReady
+            && info.civilizationStage < CIVILIZATION_BRONZEAGE
+            && (int)info.farmers.size() < farmerTarget
             && info.Human_Num < info.Human_MaxNum
             && info.Meat >= BUILDING_CENTER_CREATEFARMER_FOOD) {
             BuildingAction(b.SN, BUILDING_CENTER_CREATEFARMER);
@@ -868,9 +901,25 @@ void UsrAI::buildResourceDepots(const tagInfo& info)
 void UsrAI::researchTech(const tagInfo& info)
 {
     bool bronze = (info.civilizationStage >= CIVILIZATION_BRONZEAGE);
+    // 攒升级食物期间（市场/靶场已齐、未升级、食物<800）：
+    //   只允许谷仓研发箭塔科技（建塔防守必需），其余科技全部暂停——
+    //   防止科技研发花掉食物，导致 800 升级食物永远攒不够（第二波前必须升完）
+    bool savingForUpgrade = !bronze && canUpgradeBronze(info)
+                            && info.Meat < BUILDING_CENTER_UPGRADE_BRONZEAGE_FOOD;
     for (const tagBuilding& b : info.buildings) {
         if (b.Percent < 100 || b.Project != ACT_NULL) continue;   // 建造中或忙碌
         if (m_issued.count(b.SN)) continue;                        // 本帧已下令
+        if (savingForUpgrade) {
+            // 攒升级期间：只做谷仓的箭塔科技（其余一律暂停）
+            if (b.Type == BUILDING_GRANARY
+                && m_researchCount[BUILDING_GRANARY_ARROWTOWER] == 0
+                && info.Meat >= BUILDING_GRANARY_ARROWTOWER_FOOD) {
+                BuildingAction(b.SN, BUILDING_GRANARY_ARROWTOWER);
+                m_issued.insert(b.SN);
+                m_researchCount[BUILDING_GRANARY_ARROWTOWER]++;
+            }
+            continue;
+        }
         switch (b.Type) {
         case BUILDING_GRANARY: {
             // 解锁箭塔（工具时代）→ 升级箭塔（铜器）
@@ -1030,6 +1079,8 @@ void UsrAI::trainArmy(const tagInfo& info)
                 && info.Meat >= BUILDING_ARMYCAMP_CREATE_BROADSWORD_FOOD && info.Gold >= 15) {
                 BuildingAction(b.SN, BUILDING_ARMYCAMP_CREATE_BROADSWORD);
                 m_issued.insert(b.SN);
+            } else if (info.GameFrame < FRAME_WAVE2 && countArmy(info, AT_CLUBMAN) >= 2) {
+                // 第二波前棍棒兵只留 2 个：省食物给升级铜器/铜器兵，防止造太多吃光食物
             } else if (info.Meat >= BUILDING_ARMYCAMP_CREATE_CLUBMAN_FOOD) {
                 BuildingAction(b.SN, BUILDING_ARMYCAMP_CREATE_CLUBMAN);
                 m_issued.insert(b.SN);
@@ -1258,16 +1309,26 @@ void UsrAI::defense(const tagInfo& info)
         if (m_issued.count(a.SN)) continue;                         // 本帧已下令
 
         if (enemyVisible) {
-            // ① 优先锁定远程威胁（战车弓兵>投石车>复合弓兵>弓箭手——专杀祭司/打建筑）
+            // ① 战车弓兵绝对优先（第二波专杀祭司）：只要视野内有战车弓兵，所有兵优先锁定它
+            //    拉仇恨：战车弓兵被攻击后会反击攻击者，从而保护祭司
             int target = -1;
             double bestR = 1e18;
             for (const tagArmy& e : info.enemy_armies) {
-                if (e.Sort != AT_CHARIOT_ARCHER && e.Sort != AT_STONE_THROWER
-                    && e.Sort != AT_COMPOSITE_BOWMAN && e.Sort != AT_BOWMAN) continue;
+                if (e.Sort != AT_CHARIOT_ARCHER) continue;
                 double d = calDistance(a.DR, a.UR, e.DR, e.UR);
                 if (d < bestR) { bestR = d; target = e.SN; }
             }
-            // ② 没有远程 → 攻击最近敌人
+            // ② 无战车弓兵 → 其他远程威胁（投石车>复合弓兵>弓箭手——打建筑/远程压制）
+            if (target < 0) {
+                bestR = 1e18;
+                for (const tagArmy& e : info.enemy_armies) {
+                    if (e.Sort != AT_STONE_THROWER
+                        && e.Sort != AT_COMPOSITE_BOWMAN && e.Sort != AT_BOWMAN) continue;
+                    double d = calDistance(a.DR, a.UR, e.DR, e.UR);
+                    if (d < bestR) { bestR = d; target = e.SN; }
+                }
+            }
+            // ③ 没有远程 → 攻击最近敌人
             if (target < 0) {
                 double best = 1e18;
                 for (const tagArmy& e : info.enemy_armies) {
@@ -1500,19 +1561,14 @@ void UsrAI::handlePriest(const tagInfo& info)
     }
 
     // 5) 有其他威胁（非转化目标）→ 贴塔走位
-    //    目标 = 最近塔坐标（固定值，不用"塔+敌人反方向"——敌人位置每帧变 → 目标抖动 → 每帧重新下令）
+    //    目标 = getPriestHome（敌人反侧最远的塔，固定值）——与"被攻击走位/回塔下"目标统一，
+    //    防止"最近塔"与"敌人反侧塔"两个不同目标交替触发 → 祭司两点来回横跳
     if (threat != nullptr && nearest < threatDist) {
-        // 找最近的已建成箭塔（没有则市中心）
-        int hx = m_centerX, hy = m_centerY;
-        double bestT = 1e18;
-        for (const tagBuilding& b : info.buildings) {
-            if (b.Type != BUILDING_ARROWTOWER || b.Percent < 100) continue;
-            double d = calDistance(priest->DR, priest->UR,
-                                   (double)b.BlockDR * BLOCKSIDELENGTH, (double)b.BlockUR * BLOCKSIDELENGTH);
-            if (d < bestT) { bestT = d; hx = b.BlockDR; hy = b.BlockUR; }
+        int hx, hy;
+        getPriestHome(info, hx, hy);
+        if (hx >= 0) {
+            movePriest(priestSN, priest->DR, priest->UR, (double)hx * BLOCKSIDELENGTH, (double)hy * BLOCKSIDELENGTH, info.GameFrame);
         }
-        // 节流下令（60帧内目标不变不重复；到位即停）
-        movePriest(priestSN, priest->DR, priest->UR, (double)hx * BLOCKSIDELENGTH, (double)hy * BLOCKSIDELENGTH, info.GameFrame);
         return;
     }
 
