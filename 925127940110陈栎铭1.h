@@ -85,6 +85,7 @@ private:
     void buildArrowTower(const tagInfo& info);   // 建造第二座箭塔（与第一座形成交叉火力）
     void getPriestHome(const tagInfo& info, int& hx, int& hy) const; // 祭司站位：双塔中点>单塔>市中心
     std::unordered_map<int,int> m_towerSwitch;   // 箭塔SN -> 上次下令帧（切换节流，防频繁切换不射击）
+    std::unordered_map<int,int> m_armySwitch;    // 军队SN -> 上次转火下令帧（战车弓兵转火节流，防打断攻击）
     int m_enemyDirX = 0, m_enemyDirY = 0;        // 敌人来袭方向（相对市中心，±1）
 
 

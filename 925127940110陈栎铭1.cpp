@@ -729,9 +729,54 @@ bool UsrAI::canUpgradeBronze(const tagInfo& info) const
 //   住房5座 → 箭塔1座 → 兵营 → 市场（升级必需！）→ 靶场（升级必需）
 //   → 升级后首选：马厩 → 学院 → 农田 → 羚羊堆旁仓库
 // 并行建造：最多 2 个农民同时建（专职建造者 + 抽调一个空闲农民），加速进度
+// 靶场紧急建造：市场+兵营已建、靶场未建时（升级瓶颈），抽调伐木工去建——
+//   不再死等空闲建造者（空闲农民常被采集占满 → 靶场迟迟不建 → 无法升级）
 // ============================================================
 void UsrAI::buildBuildings(const tagInfo& info)
 {
+    // 0) 靶场紧急建造：条件齐备（市场+兵营已建、木头够150、没有在建的靶场）
+    //    → 优先用空闲建造者，没有空闲就抽调一个伐木工（升级优先级最高）
+    if (countBuilding(info, BUILDING_MARKET) > 0
+        && countBuilding(info, BUILDING_ARMYCAMP) > 0
+        && countBuilding(info, BUILDING_RANGE) == 0
+        && info.Wood >= BUILD_RANGE_WOOD
+        && info.civilizationStage < CIVILIZATION_BRONZEAGE) {
+        bool rangeBuilding = false;
+        for (const tagBuilding& b : info.buildings)
+            if (b.Type == BUILDING_RANGE && b.Percent < 100) { rangeBuilding = true; break; }
+        if (!rangeBuilding) {
+            int rbx, rby;
+            if (findBuildBlock(info, rbx, rby, 3, 3)) {
+                // 先找空闲农民（优先），再找正在砍树的伐木工（抽调）
+                int rbSN = -1;
+                for (const tagFarmer& f : info.farmers) {
+                    if (f.FarmerSort != FARMERTYPE_FARMER) continue;
+                    if (f.SN == m_builderSN || f.SN == m_depotBuilderSN) continue;
+                    if (m_issued.count(f.SN)) continue;
+                    if (f.NowState == HUMAN_STATE_IDLE) { rbSN = f.SN; break; }
+                }
+                if (rbSN < 0) {
+                    // 没有空闲 → 抓一个正在砍树的伐木工
+                    for (const tagFarmer& f : info.farmers) {
+                        if (f.FarmerSort != FARMERTYPE_FARMER) continue;
+                        if (f.NowState != HUMAN_STATE_WORKING) continue;
+                        if (f.SN == m_builderSN || f.SN == m_depotBuilderSN) continue;
+                        if (m_issued.count(f.SN)) continue;
+                        bool isWoodcutter = false;
+                        for (const tagResource& r : info.resources)
+                            if (r.SN == f.WorkObjectSN && r.Type == RESOURCE_TREE) { isWoodcutter = true; break; }
+                        if (isWoodcutter) { rbSN = f.SN; break; }
+                    }
+                }
+                if (rbSN >= 0) {
+                    HumanBuild(rbSN, BUILDING_RANGE, rbx, rby);
+                    m_issued.insert(rbSN);
+                    return;   // 本帧就建靶场（升级瓶颈优先）
+                }
+            }
+        }
+    }
+
     for (int round = 0; round < 2; ++round) {
         // 找空闲建造者：第一轮专职建造者，第二轮任意空闲农民（抽调）
         int builder = -1;
@@ -1005,8 +1050,9 @@ void UsrAI::researchTech(const tagInfo& info)
             break;
         }
         case BUILDING_MARKET: {
-            // 伐木 → 采石（前期采集加速）→ 车轮（铜器）→ 采金
-            if (m_researchCount[BUILDING_MARKET_WOOD_UPGRADE] == 0
+            // 伐木/采石 → 升级铜器后才研发（未升级前先攒 800 食物，不吃升级预算）
+            // 车轮（铜器）→ 采金（铜器后）
+            if (bronze && m_researchCount[BUILDING_MARKET_WOOD_UPGRADE] == 0
                 && info.Meat >= BUILDING_MARKET_WOOD_UPGRADE_FOOD
                 && info.Wood >= BUILDING_MARKET_WOOD_UPGRADE_WOOD) {
                 BuildingAction(b.SN, BUILDING_MARKET_WOOD_UPGRADE);
@@ -1014,8 +1060,8 @@ void UsrAI::researchTech(const tagInfo& info)
                 m_researchCount[BUILDING_MARKET_WOOD_UPGRADE]++;
                 break;
             }
-            // 采石（石头采集加速 → 箭塔/升级更快）
-            if (m_researchCount[BUILDING_MARKET_STONE_UPGRADE] == 0
+            // 采石（石头采集加速 → 箭塔/升级更快；铜器后）
+            if (bronze && m_researchCount[BUILDING_MARKET_STONE_UPGRADE] == 0
                 && info.Meat >= BUILDING_MARKET_STONE_UPGRADE_FOOD
                 && info.Stone >= BUILDING_MARKET_STONE_UPGRADE_STONE) {
                 BuildingAction(b.SN, BUILDING_MARKET_STONE_UPGRADE);
@@ -1031,7 +1077,7 @@ void UsrAI::researchTech(const tagInfo& info)
                 m_researchCount[BUILDING_MARKET_WHEEL_UPGRADE]++;
                 break;
             }
-            if (m_researchCount[BUILDING_MARKET_GOLD_UPGRADE] == 0
+            if (bronze && m_researchCount[BUILDING_MARKET_GOLD_UPGRADE] == 0
                 && info.Meat >= BUILDING_MARKET_GOLD_UPGRADE_FOOD
                 && info.Wood >= BUILDING_MARKET_GOLD_UPGRADE_WOOD) {
                 BuildingAction(b.SN, BUILDING_MARKET_GOLD_UPGRADE);
@@ -1369,8 +1415,57 @@ void UsrAI::defense(const tagInfo& info)
 
     for (const tagArmy& a : info.armies) {
         if (a.Sort == AT_PRIEST || a.Sort == AT_SCOUT) continue;   // 祭司/侦察骑兵单独调度
-        if (a.NowState != HUMAN_STATE_IDLE) continue;               // 已在战斗的不重复下令
         if (m_issued.count(a.SN)) continue;                         // 本帧已下令
+
+        if (enemyVisible) {
+            // 0) 战车弓兵转火：视野内有战车弓兵就优先打它（专杀祭司，最高优先）
+            //    分散攻击：统计每个战车弓兵已被几个己方兵锁定 → 优先打"被攻击最少"的，
+            //    避免全军集火一个、另一个无人拉仇恨一直射祭司
+            //    （若都被锁定 ≥1 人，则打最近的）
+            // 统计每个战车弓兵正被几个己方兵锁定
+            std::unordered_map<int,int> chariotLocked;
+            for (const tagArmy& my : info.armies) {
+                if (my.Sort == AT_PRIEST || my.Sort == AT_SCOUT) continue;
+                if (my.WorkObjectSN <= 0) continue;
+                for (const tagArmy& e : info.enemy_armies)
+                    if (e.Sort == AT_CHARIOT_ARCHER && e.SN == my.WorkObjectSN) {
+                        chariotLocked[e.SN]++;
+                        break;
+                    }
+            }
+            int chariot = -1;
+            int chariotCnt = 0x7fffffff;
+            double chariotD = 1e18;
+            for (const tagArmy& e : info.enemy_armies) {
+                if (e.Sort != AT_CHARIOT_ARCHER) continue;
+                int locked = chariotLocked[e.SN];
+                double d = calDistance(a.DR, a.UR, e.DR, e.UR);
+                // 被锁定更少的优先；同锁定数取更近的
+                if (locked < chariotCnt || (locked == chariotCnt && d < chariotD)) {
+                    chariotCnt = locked;
+                    chariotD = d;
+                    chariot = e.SN;
+                }
+            }
+            if (chariot >= 0) {
+                // 当前正在打战车弓兵 → 不打断
+                bool attackingChariot = false;
+                for (const tagArmy& e : info.enemy_armies)
+                    if (e.SN == a.WorkObjectSN) { attackingChariot = true; break; }
+                if (!attackingChariot) {
+                    auto it = m_armySwitch.find(a.SN);
+                    if (it == m_armySwitch.end() || info.GameFrame - it->second >= 30) {
+                        HumanAction(a.SN, chariot);          // 转火：正在打的也拉去打战车弓兵
+                        m_issued.insert(a.SN);
+                        m_armySwitch[a.SN] = info.GameFrame;
+                        continue;
+                    }
+                }
+                continue;   // 已在打战车弓兵 → 本帧不管
+            }
+        }
+        if (a.NowState != HUMAN_STATE_IDLE) continue;               // 已在战斗的不重复下令
+        if (m_issued.count(a.SN)) continue;
 
         if (enemyVisible) {
             // ① 战车弓兵绝对优先（第二波专杀祭司）：只要视野内有战车弓兵，所有兵优先锁定它
@@ -1540,51 +1635,106 @@ void UsrAI::handlePriest(const tagInfo& info)
         // 血量健康且节流期内：不 return → 把本帧让给转化逻辑
     }
 
-    // 2) 寻找转化候选
-    //    优先远程兵（弓箭手/战车弓兵/复合弓兵/投石兵）：它们打祭司最危险且塔可能够不着，
-    //    祭司转化射程12格能覆盖（弓箭手射程5、战车弓兵7）→ 优先转化保命
-    //    保守阶段（未升级）：没有远程兵 → 塔射程内最近敌人
-    //    激进阶段（升级后）：没有远程兵 → 最近敌人
+    // 2) 寻找转化候选（分阶段策略）
+    //    · 8000 帧前（第一波前后，兵少/未成型）：保持旧逻辑——祭司可主动转化保命
+    //      （远程兵优先 → 激进/保守最近敌人），不依赖己方兵先接战
+    //    · 8000 帧后（临近第二波，战车弓兵登场）：新逻辑——先等己方兵攻击到目标再转化
+    //      敌方 AI：敌人优先反击"最早攻击它的单位"（FindThreatToArmy 按首次攻击帧排序）。
+    //      己方兵先打中 → 目标反击兵，不理会祭司 → 转化施法（2~6秒）安全走完；
+    //      若祭司先转化 → 祭司成"最早攻击者" → 目标转火祭司（战车弓兵对祭司还有+7特攻）。
     bool aggressive = (info.civilizationStage >= CIVILIZATION_BRONZEAGE
                        || info.GameFrame > FRAME_WAVE1 + 3000);
     int target = -1;
 
-    // ① 优先远程兵（选最近的）
-    double bestR = 1e18;
-    for (const tagArmy& e : info.enemy_armies) {
-        if (e.Blood <= 0) continue;
-        if (e.Sort != AT_BOWMAN && e.Sort != AT_CHARIOT_ARCHER
-            && e.Sort != AT_COMPOSITE_BOWMAN && e.Sort != AT_SLINGER) continue;
-        double d = calDistance(priest->DR, priest->UR, e.DR, e.UR);
-        if (d < bestR) { bestR = d; target = e.SN; }
-    }
-    if (target >= 0) {
-        // 已选到远程兵
-    } else if (aggressive) {
-        // ② 激进：无远程兵 → 最近敌人
-        double best = 1e18;
+    if (info.GameFrame < 8000) {
+        // ===== 旧逻辑（8000帧前）：主动转化保命 =====
+        // ① 优先远程兵（选最近的）
+        double bestR = 1e18;
         for (const tagArmy& e : info.enemy_armies) {
             if (e.Blood <= 0) continue;
+            if (e.Sort != AT_BOWMAN && e.Sort != AT_CHARIOT_ARCHER
+                && e.Sort != AT_COMPOSITE_BOWMAN && e.Sort != AT_SLINGER) continue;
             double d = calDistance(priest->DR, priest->UR, e.DR, e.UR);
-            if (d < best) { best = d; target = e.SN; }
+            if (d < bestR) { bestR = d; target = e.SN; }
+        }
+        if (target < 0 && aggressive) {
+            // 激进：无远程兵 → 最近敌人
+            double best = 1e18;
+            for (const tagArmy& e : info.enemy_armies) {
+                if (e.Blood <= 0) continue;
+                double d = calDistance(priest->DR, priest->UR, e.DR, e.UR);
+                if (d < best) { best = d; target = e.SN; }
+            }
+        } else if (target < 0) {
+            // 保守：无远程兵 → 塔射程内最近敌人
+            double bestD = 1e18;
+            for (const tagArmy& e : info.enemy_armies) {
+                if (e.Blood <= 0) continue;
+                bool inTowerRange = false;
+                for (const tagBuilding& b : info.buildings) {
+                    if (b.Type != BUILDING_ARROWTOWER || b.Percent < 100) continue;
+                    double d = calDistance(e.DR, e.UR,
+                                           (double)b.BlockDR * BLOCKSIDELENGTH, (double)b.BlockUR * BLOCKSIDELENGTH);
+                    if (d <= DIS_ARROWTOWER * BLOCKSIDELENGTH) { inTowerRange = true; break; }
+                }
+                if (inTowerRange) {
+                    double d = calDistance(priest->DR, priest->UR, e.DR, e.UR);
+                    if (d < bestD) { bestD = d; target = e.SN; }
+                }
+            }
         }
     } else {
-        // ② 保守：无远程兵 → 塔射程内最近敌人
-        double bestD = 1e18;
-        for (const tagArmy& e : info.enemy_armies) {
-            if (e.Blood <= 0) continue;
-            bool inTowerRange = false;
-            for (const tagBuilding& b : info.buildings) {
-                if (b.Type != BUILDING_ARROWTOWER || b.Percent < 100) continue;
-                double d = calDistance(e.DR, e.UR,
-                                       (double)b.BlockDR * BLOCKSIDELENGTH, (double)b.BlockUR * BLOCKSIDELENGTH);
-                if (d <= DIS_ARROWTOWER * BLOCKSIDELENGTH) { inTowerRange = true; break; }
-            }
-            if (inTowerRange) {
+        // ===== 新逻辑（8000帧后）：先让火力（兵/箭塔）锁到目标，祭司再转化 =====
+        // 收集"正被己方火力攻击"的敌人：
+        //   ① 己方兵 WorkObjectSN 指向的敌人
+        //   ② 箭塔锁定目标（b.Project）——箭塔攻击同样拉仇恨（敌人转火打塔，不理会祭司）
+        std::set<int> attackedByUs;
+        for (const tagArmy& a : info.armies) {
+            if (a.Sort == AT_PRIEST || a.Sort == AT_SCOUT) continue;   // 祭司/侦察骑兵不算"兵"
+            if (a.WorkObjectSN <= 0) continue;
+            for (const tagArmy& e : info.enemy_armies)
+                if (e.SN == a.WorkObjectSN) { attackedByUs.insert(e.SN); break; }
+        }
+        for (const tagBuilding& b : info.buildings) {
+            if (b.Type != BUILDING_ARROWTOWER || b.Percent < 100) continue;
+            if (b.Project <= 0) continue;                              // 塔当前没锁定目标
+            for (const tagArmy& e : info.enemy_armies)
+                if (e.SN == b.Project) { attackedByUs.insert(e.SN); break; }
+        }
+        // ① 正被己方兵攻击的远程兵（选最近的）——安全转化（目标仇恨在兵身上）
+        if (!attackedByUs.empty()) {
+            double bestR = 1e18;
+            for (const tagArmy& e : info.enemy_armies) {
+                if (e.Blood <= 0) continue;
+                if (!attackedByUs.count(e.SN)) continue;
+                if (e.Sort != AT_BOWMAN && e.Sort != AT_CHARIOT_ARCHER
+                    && e.Sort != AT_COMPOSITE_BOWMAN && e.Sort != AT_SLINGER) continue;
                 double d = calDistance(priest->DR, priest->UR, e.DR, e.UR);
-                if (d < bestD) { bestD = d; target = e.SN; }
+                if (d < bestR) { bestR = d; target = e.SN; }
+            }
+            // ② 无被攻击的远程兵 → 被攻击的最近敌人
+            if (target < 0) {
+                double bestD = 1e18;
+                for (const tagArmy& e : info.enemy_armies) {
+                    if (e.Blood <= 0) continue;
+                    if (!attackedByUs.count(e.SN)) continue;
+                    if (!aggressive) {
+                        // 保守：只在塔射程内的才转（祭司贴塔更安全）
+                        bool inTowerRange = false;
+                        for (const tagBuilding& b : info.buildings) {
+                            if (b.Type != BUILDING_ARROWTOWER || b.Percent < 100) continue;
+                            double d = calDistance(e.DR, e.UR,
+                                                   (double)b.BlockDR * BLOCKSIDELENGTH, (double)b.BlockUR * BLOCKSIDELENGTH);
+                            if (d <= DIS_ARROWTOWER * BLOCKSIDELENGTH) { inTowerRange = true; break; }
+                        }
+                        if (!inTowerRange) continue;
+                    }
+                    double d = calDistance(priest->DR, priest->UR, e.DR, e.UR);
+                    if (d < bestD) { bestD = d; target = e.SN; }
+                }
             }
         }
+        // ③ attackedByUs 为空 → target 保持 -1：本帧不转化（等兵先接战建立仇恨）
     }
 
     // 2.4) 检查祭司是否在箭塔保护范围内（距最近塔 <= 6 格）——转化必须在塔下进行
