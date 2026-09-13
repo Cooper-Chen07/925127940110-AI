@@ -334,7 +334,10 @@ void UsrAI::manageVillagers(const tagInfo& info)
     for (const tagFarmer& f : info.farmers) {
         if (f.FarmerSort != FARMERTYPE_FARMER) continue;
         total++;
-        if (f.NowState != HUMAN_STATE_WORKING) continue;
+        // 【关键修复】在途(WALKING)农民也必须计入配额！
+        //   原来只统计 WORKING：农民走在路上时不计入 → 下一个空闲农民又被派去同一工种
+        //   → 配额被反复突破（实测"很多农民去伐木"的根因）
+        if (f.NowState != HUMAN_STATE_WORKING && f.NowState != HUMAN_STATE_WALKING) continue;
         // 工作对象是农田？
         bool isFarm = false;
         for (const tagBuilding& b : info.buildings)
@@ -360,9 +363,12 @@ void UsrAI::manageVillagers(const tagInfo& info)
     }
 
     // 2) 统计每个工作目标被几个农民使用（用于避免资源点扎堆）
+    //    【修复】只统计"真正在用该目标"的农民（工作 + 在途）；原逻辑统计"非工作"农民会误算
     std::unordered_map<int,int> targetCount;
     for (const tagFarmer& f : info.farmers)
-        if (f.NowState != HUMAN_STATE_WORKING) targetCount[f.WorkObjectSN]++;
+        if ((f.NowState == HUMAN_STATE_WORKING || f.NowState == HUMAN_STATE_WALKING)
+            && f.WorkObjectSN > 0)
+            targetCount[f.WorkObjectSN]++;
 
     // 3) 动态配额【3.0.7g 发育策略】
     //    开局：4 采果 + 3 伐木 + 1 专职建造（正好 8 人，不挖石：初始 150 石正好建 1 座塔）
@@ -370,15 +376,10 @@ void UsrAI::manageVillagers(const tagInfo& info)
     int targetFood = total / 2;                 // 采粮人数 >= 总人数一半
     if (targetFood < 5) targetFood = 5;         // 保底 5 个
     int targetWood = 3;                         // 开局 3 伐木（策略指定）
-    // 木头不足时加人（策略：木材不够派两个人帮忙伐木）
-    int upgradeBuilt = 0;
-    if (countBuilding(info, BUILDING_MARKET) > 0) upgradeBuilt++;
-    if (countBuilding(info, BUILDING_RANGE) > 0) upgradeBuilt++;
-    if (countBuilding(info, BUILDING_STABLE) > 0) upgradeBuilt++;
-    if (upgradeBuilt == 0) {
-        if (info.Wood < 150) targetWood = 4;    // 木头不足：加 1 人
-        if (info.Wood < 60) targetWood = 5;     // 严重不足：再加 1 人
-    }
+    // 【发育策略】木材不够就派 1~2 人帮忙伐木（3 → 4 → 5，最多 5 人）
+    //   原逻辑只在"升级建筑尚未建成"时加人 → 铜器后木头不够不会加人，与策略不符
+    if (info.Wood < 150) targetWood = 4;        // 木头不足：加 1 人
+    if (info.Wood < 60) targetWood = 5;         // 严重不足：再加 1 人
     // 【发育策略】不派挖石工：初始 150 石正好建 1 座塔（塔上限 1 座），人力全给食物/木头/黄金
     int targetStone = 0;
     // 【3.0.7g 调整】金矿 200→400（翻倍）→ 黄金更充裕，挖金保持 3 人
@@ -406,8 +407,10 @@ void UsrAI::manageVillagers(const tagInfo& info)
                     if (b.SN == f.WorkObjectSN) { valid = true; break; }   // 农田等建筑目标
             }
             if (valid) {
-                // 卡住检测：动物 60 帧；静态资源（浆果/树/石）120 帧（防止被建筑挡住罚站）
-                // 只对近距离目标检测（远处目标走路正常，避免误伤）
+                // 卡住检测【3.0.7g 加强】：某些地图树/矿在水边或被挡住 → 农民原地罚站
+                //   a) 走路：近距(<15格) 动物 60 帧 / 静态资源 120 帧；中距(<28格) 静态资源 400 帧
+                //   b) 已在"工作"却没站到目标旁(>3格) → 引擎寻路失败被卡住
+                //   判定卡住 → 该目标拉黑 600 帧（换一棵树/一处矿），不再反复重派同一目标
                 bool isAnimal = false;
                 double targetDR = 0, targetUR = 0;
                 bool hasTarget = false;
@@ -420,21 +423,33 @@ void UsrAI::manageVillagers(const tagInfo& info)
                     hasTarget = true;
                     break;
                 }
-                if (f.NowState == HUMAN_STATE_WALKING && hasTarget
-                    && calDistance(f.DR, f.UR, targetDR, targetUR) < 15.0 * BLOCKSIDELENGTH) {
-                    int timeout = isAnimal ? 60 : 120;
-                    auto it = m_moveStart.find(f.SN);
-                    if (it == m_moveStart.end()) {
-                        m_moveStart[f.SN] = info.GameFrame;   // 记录开始移动帧
-                        continue;
-                    } else if (info.GameFrame - it->second <= timeout) {
-                        continue;                              // 正常移动中
+                bool stuck = false;
+                bool suspect = false;              // 是否处于"可疑计时中"（计时存在 m_moveStart 里）
+                if (hasTarget) {
+                    double tDist = calDistance(f.DR, f.UR, targetDR, targetUR);
+                    if (f.NowState == HUMAN_STATE_WALKING) {
+                        int timeout = 0;
+                        if (tDist < 15.0 * BLOCKSIDELENGTH) timeout = isAnimal ? 60 : 120;
+                        else if (!isAnimal && tDist < 28.0 * BLOCKSIDELENGTH) timeout = 400;
+                        if (timeout > 0) {
+                            suspect = true;            // 近距离走路 → 开始计时
+                            auto it = m_moveStart.find(f.SN);
+                            if (it == m_moveStart.end()) m_moveStart[f.SN] = info.GameFrame;
+                            else if (info.GameFrame - it->second > timeout) stuck = true;
+                        }
+                    } else if (f.NowState == HUMAN_STATE_WORKING && !isAnimal
+                               && tDist > 3.0 * BLOCKSIDELENGTH) {
+                        // 说在干活却离资源 >3 格 → 连续 100 帧（4 秒）都这样才判卡住（防误判）
+                        suspect = true;
+                        auto it = m_moveStart.find(f.SN);
+                        if (it == m_moveStart.end()) m_moveStart[f.SN] = info.GameFrame;
+                        else if (info.GameFrame - it->second > 100) stuck = true;
                     }
-                    m_moveStart.erase(f.SN);                   // 超时 → 判定卡住，重新分配
-                } else {
-                    m_moveStart.erase(f.SN);                   // 远处目标/其他状态：正常工作不打扰
-                    continue;
                 }
+                if (!suspect) { m_moveStart.erase(f.SN); continue; }   // 正常工作/远处目标 → 不打扰
+                if (!stuck) continue;                                  // 还在计时 → 继续观察
+                m_moveStart.erase(f.SN);
+                if (hasTarget) m_badTarget[f.WorkObjectSN] = info.GameFrame;   // 拉黑，换目标
             }
             // 目标失效或卡住 → 掉下去重新分配（新指令覆盖旧目标）
         }
@@ -527,21 +542,8 @@ void UsrAI::manageVillagers(const tagInfo& info)
                     foodCnt++;
                     continue;
                 }
-                // 【发育策略】农田不足 3 块 → 开一块新田（建 3 块即可；其余农民去采金）
-                if (countBuilding(info, BUILDING_FARM) < 3
-                    && info.Wood >= BUILD_FARM_WOOD) {
-                    // 找谷仓位置（默认市中心）
-                    int gx = m_centerX, gy = m_centerY;
-                    for (const tagBuilding& b : info.buildings) {
-                        if (b.Type == BUILDING_GRANARY) { gx = b.BlockDR; gy = b.BlockUR; break; }
-                    }
-                    int x, y;
-                    if (findBuildBlock(info, x, y, 3, 3, gx, gy)) {
-                        HumanBuild(f.SN, BUILDING_FARM, x, y);
-                        m_issued.insert(f.SN);
-                        continue;
-                    }
-                }
+                // 【用户要求】建农田也不再由采集者负责 → 交给专职建造者（见 buildBuildings 第 8) 项）
+                //   采集者只"使用"农田（上面已就近派空闲田），没有空田就去采金
             }
         }
         // ⑤ 黄金：【发育策略】所有人都可以去采金（多余农民去采金，避免全堆到伐木）
@@ -690,6 +692,7 @@ int UsrAI::findNearestResource(const tagInfo& info, int type, int farmerSN)
     double best = 1e18;
     for (const tagResource& r : info.resources) {
         if (r.Type != type || r.Cnt <= 0) continue;      // 只找对应类型且还有剩余的资源
+        if (isBadTarget(r.SN, info.GameFrame)) continue; // 近期判定"卡住/不可达" → 换一个目标
         double d = calDistance(f->DR, f->UR, r.DR, r.UR);
         if (d < best) { best = d; sn = r.SN; }
     }
@@ -752,6 +755,7 @@ int UsrAI::findNearestTree(const tagInfo& info, int farmerSN)
         return best;
     };
     for (const tagResource* t : trees) {
+        if (isBadTarget(t->SN, info.GameFrame)) continue;         // 卡住过的树 → 换一棵
         int c = cnt[t->SN];
         double d = calDistance(f->DR, f->UR, t->DR, t->UR);
         // 人数权重最大（先分散防扎堆）> 离交付点距离（就近运木）> 离自己距离
@@ -763,6 +767,7 @@ int UsrAI::findNearestTree(const tagInfo& info, int farmerSN)
     // 所有树都 ≥2 人（树少人多）→ 退而求其次选最近的（总比闲着好）
     double bestD = 1e18;
     for (const tagResource* t : trees) {
+        if (isBadTarget(t->SN, info.GameFrame)) continue;         // 卡住过的树不再回头选
         double d = calDistance(f->DR, f->UR, t->DR, t->UR);
         if (d < bestD) { bestD = d; bestSn = t->SN; }
     }
@@ -826,79 +831,26 @@ bool UsrAI::canUpgradeBronze(const tagInfo& info) const
 // 建筑规划（用户指定顺序）：
 //   住房5座 → 箭塔1座 → 兵营 → 市场（升级必需！）→ 靶场（升级必需）
 //   → 升级后首选：马厩 → 学院 → 农田 → 羚羊堆旁仓库
-// 并行建造：最多 2 个农民同时建（专职建造者 + 抽调一个空闲农民），加速进度
-// 靶场紧急建造：市场+兵营已建、靶场未建时（升级瓶颈），抽调伐木工去建——
-//   不再死等空闲建造者（空闲农民常被采集占满 → 靶场迟迟不建 → 无法升级）
+// 【用户要求·3.0.7g 修正】**所有基地建筑只由专职建造者（m_builderSN）一个人建**
+//   实测问题：并行建造（抽调第二个空闲农民 + 靶场紧急抽调伐木工）导致
+//     ① 开局有 2 个人在建房屋（伐木只剩 2 人）
+//     ② 新生成的农民刚出生（IDLE）就被抓去建市场 → 不去采果/伐木
+//   现在：建造者正在忙 → 本帧跳过，等他建完当前建筑再接下一条（串行建造）
 // ============================================================
 void UsrAI::buildBuildings(const tagInfo& info)
 {
-    // 0) 靶场紧急建造：条件齐备（市场+兵营已建、木头够150、没有在建的靶场）
-    //    → 优先用空闲建造者，没有空闲就抽调一个伐木工（升级优先级最高）
-    if (countBuilding(info, BUILDING_MARKET) > 0
-        && countBuilding(info, BUILDING_ARMYCAMP) > 0
-        && countBuilding(info, BUILDING_RANGE) == 0
-        && info.Wood >= BUILD_RANGE_WOOD
-        && info.civilizationStage < CIVILIZATION_BRONZEAGE) {
-        bool rangeBuilding = false;
-        for (const tagBuilding& b : info.buildings)
-            if (b.Type == BUILDING_RANGE && b.Percent < 100) { rangeBuilding = true; break; }
-        if (!rangeBuilding) {
-            int rbx, rby;
-            if (findBuildBlock(info, rbx, rby, 3, 3)) {
-                // 先找空闲农民（优先），再找正在砍树的伐木工（抽调）
-                int rbSN = -1;
-                for (const tagFarmer& f : info.farmers) {
-                    if (f.FarmerSort != FARMERTYPE_FARMER) continue;
-                    if (f.SN == m_builderSN || f.SN == m_depotBuilderSN) continue;
-                    if (m_issued.count(f.SN)) continue;
-                    if (f.NowState == HUMAN_STATE_IDLE) { rbSN = f.SN; break; }
-                }
-                if (rbSN < 0) {
-                    // 没有空闲 → 抓一个正在砍树的伐木工
-                    for (const tagFarmer& f : info.farmers) {
-                        if (f.FarmerSort != FARMERTYPE_FARMER) continue;
-                        if (f.NowState != HUMAN_STATE_WORKING) continue;
-                        if (f.SN == m_builderSN || f.SN == m_depotBuilderSN) continue;
-                        if (m_issued.count(f.SN)) continue;
-                        bool isWoodcutter = false;
-                        for (const tagResource& r : info.resources)
-                            if (r.SN == f.WorkObjectSN && r.Type == RESOURCE_TREE) { isWoodcutter = true; break; }
-                        if (isWoodcutter) { rbSN = f.SN; break; }
-                    }
-                }
-                if (rbSN >= 0) {
-                    HumanBuild(rbSN, BUILDING_RANGE, rbx, rby);
-                    m_issued.insert(rbSN);
-                    return;   // 本帧就建靶场（升级瓶颈优先）
-                }
-            }
+    // 找专职建造者：只有他"空闲且本帧没被下令"时才派活
+    int builder = -1;
+    if (m_builderSN >= 0) {
+        for (const tagFarmer& f : info.farmers) {
+            if (f.SN != m_builderSN) continue;
+            if (f.NowState == HUMAN_STATE_IDLE && !m_issued.count(f.SN)) builder = f.SN;
+            break;
         }
     }
+    if (builder == -1) return;      // 没有建造者/他正在建 → 绝不占用采集农民
 
-    for (int round = 0; round < 2; ++round) {
-        // 找空闲建造者：第一轮专职建造者，第二轮任意空闲农民（抽调）
-        int builder = -1;
-        if (round == 0) {
-            if (m_builderSN >= 0) {
-                for (const tagFarmer& f : info.farmers) {
-                    if (f.SN == m_builderSN) {
-                        if (f.NowState == HUMAN_STATE_IDLE && !m_issued.count(f.SN)) builder = f.SN;
-                        break;
-                    }
-                }
-            }
-        } else {
-            for (const tagFarmer& f : info.farmers) {
-                if (f.FarmerSort != FARMERTYPE_FARMER) continue;
-                if (f.NowState != HUMAN_STATE_IDLE) continue;
-                if (m_issued.count(f.SN)) continue;
-                if (f.SN == m_builderSN) continue;          // 第一轮已用专职建造者
-                if (f.SN == m_depotBuilderSN) continue;     // 资源点建造者不抽调（专职建仓库/谷仓）
-                builder = f.SN;
-                break;
-            }
-        }
-        if (builder == -1) break;
+    {
 
         bool built = false;
         // 【发育策略·建造线】住房×2（共4座=20人口）→ 箭塔1座 → 市场（随即升伐木科技）
@@ -988,7 +940,7 @@ void UsrAI::buildBuildings(const tagInfo& info)
         // 8) 农田（升级后，谷仓旁）
         else if (info.civilizationStage >= CIVILIZATION_BRONZEAGE
             && countBuilding(info, BUILDING_MARKET) > 0
-            && countBuilding(info, BUILDING_FARM) < (int)info.farmers.size() / 2
+            && countBuilding(info, BUILDING_FARM) < 3
             && info.Wood >= BUILD_FARM_WOOD) {
             int gx = m_centerX, gy = m_centerY;
             for (const tagBuilding& b : info.buildings)
@@ -1039,7 +991,7 @@ void UsrAI::buildBuildings(const tagInfo& info)
             }
         }
         // （羚羊堆仓库/浆果堆谷仓由采集者负责，见 buildResourceDepots）
-        if (!built) break;   // 无可建建筑，不再找第二个农民
+        if (!built) return;  // 无可建建筑 → 本帧结束（绝不抽调其他农民帮忙）
     }
 }
 
@@ -1051,45 +1003,55 @@ void UsrAI::buildBuildings(const tagInfo& info)
 // ============================================================
 void UsrAI::buildResourceDepots(const tagInfo& info)
 {
-    // ---- 判断是否需要建仓 ----
-    // 1) 羚羊堆旁仓库（猎物 ≥3 且仓库不足 2）
-    int animalCnt = 0;
-    double ax = 0, ay = 0;
+    // ---- 判断是否需要建仓（【新策略】按"离最近储存点的距离"判断）----
+    //   开局通常已有固定的浆果/猎物群；若探路后发现新的浆果/羚羊离现有储存点太远
+    //   → 就近再建一个（浆果→谷仓，打猎肉→仓库），缩短往返
+    //   阈值 8 格；每类最多 3 座（避免乱建浪费木头）
+    const double NEED_DIST = 8.0 * BLOCKSIDELENGTH;
+
+    // ① 找"离最近储存点最远的浆果丛"——它就是最需要就近储存的那一堆
+    //    【修正】市镇中心可存放所有资源 → 距离判断要把市中心也算进去（近的话不用建）
+    const tagResource* farBush = nullptr;
+    double farBushD = 0;
+    for (const tagResource& r : info.resources) {
+        if (r.Type != RESOURCE_BUSH || r.Cnt <= 0) continue;
+        double nearest = 1e18;
+        for (const tagBuilding& b : info.buildings) {
+            if (b.Percent < 100) continue;
+            if (b.Type != BUILDING_GRANARY && b.Type != BUILDING_CENTER) continue;
+            double d = calDistance(r.DR, r.UR,
+                                   (double)b.BlockDR * BLOCKSIDELENGTH,
+                                   (double)b.BlockUR * BLOCKSIDELENGTH);
+            if (d < nearest) nearest = d;
+        }
+        if (nearest > farBushD) { farBushD = nearest; farBush = &r; }
+    }
+    // ② 找"离最近储存点最远的猎物"（仓库 或 市中心）
+    const tagResource* farPrey = nullptr;
+    double farPreyD = 0;
     for (const tagResource& r : info.resources) {
         if (r.Type != RESOURCE_GAZELLE && r.Type != RESOURCE_ELEPHANT && r.Type != RESOURCE_LION) continue;
         if (r.Cnt <= 0) continue;
-        animalCnt++;
-        ax += r.DR;
-        ay += r.UR;
-    }
-    bool needStock = (animalCnt >= 3 && countBuilding(info, BUILDING_STOCK) < 2
-                      && info.Wood >= BUILD_STOCK_WOOD);
-    // 2) 浆果堆旁谷仓（浆果 ≥3 且离现有谷仓远）
-    int berryCnt2 = 0;
-    double bx = 0, by = 0;
-    for (const tagResource& r : info.resources) {
-        if (r.Type != RESOURCE_BUSH || r.Cnt <= 0) continue;
-        berryCnt2++;
-        bx += r.DR;
-        by += r.UR;
-    }
-    bool needGranary = false;
-    if (berryCnt2 >= 3 && countBuilding(info, BUILDING_GRANARY) < 2
-        && info.Wood >= BUILD_GRANARY_WOOD) {
-        double maxBerryDist = 0;
-        for (const tagResource& r : info.resources) {
-            if (r.Type != RESOURCE_BUSH || r.Cnt <= 0) continue;
-            double minD = 1e18;
-            for (const tagBuilding& b : info.buildings) {
-                if (b.Type != BUILDING_GRANARY || b.Percent < 100) continue;
-                double d = calDistance(r.DR, r.UR,
-                                       (double)b.BlockDR * BLOCKSIDELENGTH, (double)b.BlockUR * BLOCKSIDELENGTH);
-                if (d < minD) minD = d;
-            }
-            if (minD > maxBerryDist) maxBerryDist = minD;
+        double nearest = 1e18;
+        for (const tagBuilding& b : info.buildings) {
+            if (b.Percent < 100) continue;
+            if (b.Type != BUILDING_STOCK && b.Type != BUILDING_CENTER) continue;
+            double d = calDistance(r.DR, r.UR,
+                                   (double)b.BlockDR * BLOCKSIDELENGTH,
+                                   (double)b.BlockUR * BLOCKSIDELENGTH);
+            if (d < nearest) nearest = d;
         }
-        needGranary = (maxBerryDist > 6.0 * BLOCKSIDELENGTH);
+        if (nearest > farPreyD) { farPreyD = nearest; farPrey = &r; }
     }
+    // 【用户要求】储存点只做**距离判断**，不判断靶场（不等靶场建成，该建就建）
+    //   仓库（打猎肉）：离最近储存点（仓库/市中心）> 8 格 → 就近建一个
+    //   谷仓（浆果）  ：离最近储存点（谷仓/市中心）> 8 格 → 就近建一个
+    bool needStock = (farPrey != nullptr && farPreyD > NEED_DIST
+                      && countBuilding(info, BUILDING_STOCK) < 3
+                      && info.Wood >= BUILD_STOCK_WOOD);
+    bool needGranary = (farBush != nullptr && farBushD > NEED_DIST
+                        && countBuilding(info, BUILDING_GRANARY) < 3
+                        && info.Wood >= BUILD_GRANARY_WOOD);
     // 没有任何要建的 + 没在役建造者 → 直接结束
     if (!needStock && !needGranary && m_depotBuilderSN < 0) return;
 
@@ -1118,10 +1080,10 @@ void UsrAI::buildResourceDepots(const tagInfo& info)
     // 建造者正在建造/行走（非空闲）→ 不打扰，等建完
     if (builder->NowState != HUMAN_STATE_IDLE) return;
 
-    // ---- 空闲状态：优先派他去建仓库/谷仓 ----
-    if (needStock) {
-        int gx = (int)(ax / animalCnt / BLOCKSIDELENGTH);
-        int gy = (int)(ay / animalCnt / BLOCKSIDELENGTH);
+    // ---- 空闲状态：优先派他去建仓库/谷仓（就建在"最远的那一堆"资源旁）----
+    if (needStock && farPrey != nullptr) {
+        int gx = (int)(farPrey->DR / BLOCKSIDELENGTH);
+        int gy = (int)(farPrey->UR / BLOCKSIDELENGTH);
         int x, y;
         if (findBuildBlock(info, x, y, 3, 3, gx, gy)) {
             HumanBuild(m_depotBuilderSN, BUILDING_STOCK, x, y);
@@ -1129,9 +1091,9 @@ void UsrAI::buildResourceDepots(const tagInfo& info)
             return;
         }
     }
-    if (needGranary) {
-        int gx = (int)(bx / berryCnt2 / BLOCKSIDELENGTH);
-        int gy = (int)(by / berryCnt2 / BLOCKSIDELENGTH);
+    if (needGranary && farBush != nullptr) {
+        int gx = (int)(farBush->DR / BLOCKSIDELENGTH);
+        int gy = (int)(farBush->UR / BLOCKSIDELENGTH);
         int x, y;
         if (findBuildBlock(info, x, y, 3, 3, gx, gy)) {
             HumanBuild(m_depotBuilderSN, BUILDING_GRANARY, x, y);
@@ -1190,34 +1152,12 @@ void UsrAI::researchTech(const tagInfo& info)
         if (b.Percent < 100 || b.Project != ACT_NULL) continue;   // 建造中或忙碌
         if (m_issued.count(b.SN)) continue;                        // 本帧已下令
         if (savingForUpgrade) {
-            // 攒升级期间：只做谷仓的箭塔科技（其余一律暂停）
-            if (b.Type == BUILDING_GRANARY
-                && m_researchCount[BUILDING_GRANARY_ARROWTOWER] == 0
-                && info.Meat >= BUILDING_GRANARY_ARROWTOWER_FOOD) {
-                BuildingAction(b.SN, BUILDING_GRANARY_ARROWTOWER);
-                m_issued.insert(b.SN);
-                m_researchCount[BUILDING_GRANARY_ARROWTOWER]++;
-            }
+            // 攒升级期间：所有科技暂停（【新策略】不再研发箭塔科技 → 不花 50 食物）
             continue;
         }
         switch (b.Type) {
         case BUILDING_GRANARY: {
-            // 解锁箭塔（工具时代）→ 升级箭塔（铜器）
-            if (m_researchCount[BUILDING_GRANARY_ARROWTOWER] == 0
-                && info.Meat >= BUILDING_GRANARY_ARROWTOWER_FOOD) {
-                BuildingAction(b.SN, BUILDING_GRANARY_ARROWTOWER);
-                m_issued.insert(b.SN);
-                m_researchCount[BUILDING_GRANARY_ARROWTOWER]++;
-                break;
-            }
-            if (bronze && m_researchCount[BUILDING_GRANARY_ARROWTOWE_UPGRADE] == 0
-                && info.Meat >= BUILDING_GRANARY_UPGRADE_ARROWTOWER_FOOD
-                && info.Stone >= BUILDING_GRANARY_UPGRADE_ARROWTOWER_STONE) {
-                BuildingAction(b.SN, BUILDING_GRANARY_ARROWTOWE_UPGRADE);
-                m_issued.insert(b.SN);
-                m_researchCount[BUILDING_GRANARY_ARROWTOWE_UPGRADE]++;
-                break;
-            }
+            // 【发育策略】开局地图自带 1 座箭塔，不造塔/不升塔 → 箭塔科技一律不研发（省 50 食物）
             break;
         }
         case BUILDING_MARKET: {
@@ -1233,23 +1173,8 @@ void UsrAI::researchTech(const tagInfo& info)
                 m_researchCount[BUILDING_MARKET_WOOD_UPGRADE]++;
                 break;
             }
-            // 采石（石头采集加速 → 箭塔/升级更快；铜器后）
-            if (bronze && m_researchCount[BUILDING_MARKET_STONE_UPGRADE] == 0
-                && info.Meat >= BUILDING_MARKET_STONE_UPGRADE_FOOD
-                && info.Stone >= BUILDING_MARKET_STONE_UPGRADE_STONE) {
-                BuildingAction(b.SN, BUILDING_MARKET_STONE_UPGRADE);
-                m_issued.insert(b.SN);
-                m_researchCount[BUILDING_MARKET_STONE_UPGRADE]++;
-                break;
-            }
-            if (bronze && m_researchCount[BUILDING_MARKET_WHEEL_UPGRADE] == 0
-                && info.Meat >= BUILDING_MARKET_WHEEL_UPGRADE_FOOD
-                && info.Wood >= BUILDING_MARKET_WHEEL_UPGRADE_WOOD) {
-                BuildingAction(b.SN, BUILDING_MARKET_WHEEL_UPGRADE);
-                m_issued.insert(b.SN);
-                m_researchCount[BUILDING_MARKET_WHEEL_UPGRADE]++;
-                break;
-            }
+            // 【发育策略】采石科技停用（不挖石、不造塔/投石兵）→ 省 100 食 + 50 石
+            // 【发育策略】车轮科技停用（不出四马战车/战车弓兵）→ 省 150 食 + 100 木
             if (bronze && m_researchCount[BUILDING_MARKET_GOLD_UPGRADE] == 0
                 && info.Meat >= BUILDING_MARKET_GOLD_UPGRADE_FOOD
                 && info.Wood >= BUILDING_MARKET_GOLD_UPGRADE_WOOD) {
@@ -1381,12 +1306,9 @@ void UsrAI::trainArmy(const tagInfo& info)
             }
             break;
         case BUILDING_STABLE:
-            // 【3.0.7g 新策略】骑兵为主力（70食+80金，150血/速度4，克步兵且能救祭司）
-            //   · 保留 1 个侦察骑兵探路
-            if (countArmy(info, AT_SCOUT) < 1 && info.Meat >= BUILDING_STABLE_CREATE_SCOUT_FOOD) {
-                BuildingAction(b.SN, BUILDING_STABLE_CREATE_SCOUT);
-                m_issued.insert(b.SN);
-            } else if (bronze && info.Meat >= BUILDING_STABLE_CREATE_CAVALRY_FOOD && info.Gold >= 80) {
+            // 【发育策略】不造侦察骑兵（100 食物太贵，探路靠祭司）→ 直接出骑兵
+            //   骑兵：70食+80金，150血/速度4，克步兵且能救祭司
+            if (bronze && info.Meat >= BUILDING_STABLE_CREATE_CAVALRY_FOOD && info.Gold >= 80) {
                 BuildingAction(b.SN, BUILDING_STABLE_CREATE_CAVALRY);
                 m_issued.insert(b.SN);
             }
@@ -1825,6 +1747,39 @@ void UsrAI::handlePriest(const tagInfo& info)
     bool inConversion = convertingNow || justOrderedConvert;
     bool lowBlood = (priest->Blood < priest->MaxBlood * 3 / 5);      // <60%
     bool criticalBlood = (priest->Blood < priest->MaxBlood / 4);     // <25% 濒死
+
+    // 1.6) 【防守策略·用户要求】受到攻击且"当前没在转化" → 立刻开始转化（自卫，不等己方火力锁定）
+    //      前提：未在转化 + 冷却已好（游戏20秒）+ 未濒死（濒死优先逃命，见下面走位）
+    //      目标：① 正在攻击祭司的敌人 ② 找不到(快照延迟)则射程内最近的敌人
+    if (beingHit && !inConversion && !criticalBlood
+        && priest->ConvertCooldown <= 0) {
+        bool tooSoon = (m_convertStartFrame >= 0
+                        && info.GameFrame - m_convertStartFrame < 120);
+        if (!tooSoon) {
+            int attackerSN = -1;
+            for (const tagArmy& e : info.enemy_armies) {
+                if (e.Blood <= 0) continue;
+                if (e.WorkObjectSN == priestSN) { attackerSN = e.SN; break; }   // 正在打我
+            }
+            if (attackerSN < 0) {
+                // 快照延迟等原因找不到攻击者 → 用转化射程内最近的敌人
+                double bestD = 1e18;
+                for (const tagArmy& e : info.enemy_armies) {
+                    if (e.Blood <= 0) continue;
+                    double d = calDistance(priest->DR, priest->UR, e.DR, e.UR);
+                    if (d <= DIS_PRIEST * BLOCKSIDELENGTH && d < bestD) { bestD = d; attackerSN = e.SN; }
+                }
+            }
+            if (attackerSN >= 0) {
+                HumanAction(priestSN, attackerSN);   // 立刻转化（自卫）
+                m_issued.insert(priestSN);
+                m_convertTarget = attackerSN;
+                m_convertStartFrame = info.GameFrame;
+                return;
+            }
+        }
+    }
+
     if (beingHit && !info.enemy_armies.empty()
         && (criticalBlood || (!inConversion && lowBlood))) {
         // 走位目标 = 固定安全位（塔下/市中心，getPriestHome）：挨打就往安全位撤，到位即停
