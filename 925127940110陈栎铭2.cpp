@@ -413,7 +413,19 @@ void UsrAI::manageVillagers(const tagInfo& info)
     int targetStone = 0;
     // 【3.0.7g 调整】金矿 200→400（翻倍）→ 黄金更充裕，挖金保持 3 人
     // 【发育策略】3 人采金：采金不占食物预算，且铜器后造兵急用黄金；多余农民优先采金而非伐木
+    // 【用户要求·3.0.7g】升级铜器前**不采黄金**：原来 3 个采金的人先去采食物/木材；
+    //   一旦铜器升级已经开始（市中心正在升级，TIME_BUILDING_CENTER_UPGRADE=60 秒）
+    //   → 按升级进度"陆续"派人去采金：0 人 → 1 → 2 → 3 人；升完铜器后固定 3 人。
     int targetGold = 3;
+    if (info.civilizationStage < CIVILIZATION_BRONZEAGE) {
+        if (m_bronzeUpgradeFrame < 0) {
+            targetGold = 0;                        // 还没开始升级 → 一个都不去采金
+        } else {
+            int elapsed = info.GameFrame - m_bronzeUpgradeFrame;
+            targetGold = 1 + elapsed / 500;        // 每 20 秒加 1 人（升级总时长 60 秒）
+            if (targetGold > 3) targetGold = 3;
+        }
+    }
 
     // 3) 逐个给空闲农民分配工作
     //    额外处理：非空闲但"工作目标失效"的农民（如猎取的羚羊尸体已被采完）
@@ -949,6 +961,7 @@ void UsrAI::manageCenter(const tagInfo& info)
             && info.Meat >= BUILDING_CENTER_UPGRADE_BRONZEAGE_FOOD) {
             BuildingAction(b.SN, BUILDING_CENTER_UPGRADE);
             m_issued.insert(b.SN);
+            m_bronzeUpgradeFrame = info.GameFrame;   // 记录升级开始帧（采金人数按它递增）
             return;     // 本帧中心只做一件事
         }
         // 2) 生产农民：升级建筑没建齐时正常补农民；建齐后停补、全力攒 800 食物升级
