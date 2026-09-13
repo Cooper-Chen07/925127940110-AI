@@ -47,6 +47,8 @@ private:
     void updateMap(const tagInfo& info);         // 建立地图标记数组
     void markBlock(int bx, int by, int size, int val);   // 标记一片占用区域
     bool findBuildBlock(const tagInfo& info, int& x, int& y, int w, int h, int nearX = -1, int nearY = -1); // 找 w×h 可建空地（可指定附近位置）
+    bool canPlace(const tagInfo& info, int i, int j, int w, int h) const;   // (i,j) 处能否放 w×h 建筑
+    bool findBuildBlockNear(const tagInfo& info, int& x, int& y, int w, int h, int cx, int cy, int maxR); // 以(cx,cy)为中心由近到远找空地
 
     // ===== 经济：农民工作分配 =====
     static const int MAX_HUNTER_PER_PREY = 2;     // 每只活物最多猎人（两两一组分散猎杀）

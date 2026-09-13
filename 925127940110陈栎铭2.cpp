@@ -263,19 +263,68 @@ void UsrAI::markBlock(int bx, int by, int size, int val)
 // ============================================================
 // 寻找 w×h 的可建造空地（返回左下角块坐标）
 // 要求：区域内全是已探明空地(m_map==0)，且高度一致（平地）
-// nearX/nearY >= 0 时从该位置附近开始搜索（用于指定建筑布局）
+// (i,j) 处能否放 w×h 建筑：地图内 + m_map 空闲 + 地形等高 + 不紧挨浆果丛
+// ============================================================
+bool UsrAI::canPlace(const tagInfo& info, int i, int j, int w, int h) const
+{
+    if (info.theMap == nullptr) return false;
+    const auto& terrain = *info.theMap;
+    if (i < 0 || j < 0 || i + w > 100 || j + h > 100) return false;
+    int height = terrain[i][j].height;
+    for (int di = 0; di < w; ++di) {
+        for (int dj = 0; dj < h; ++dj) {
+            if (m_map[i + di][j + dj] != 0) return false;
+            if (terrain[i + di][j + dj].height != height) return false;
+        }
+    }
+    // 外扩 1 圈避开浆果丛：建筑不能紧挨采集点，否则农民采浆果会被卡住
+    for (int di = -1; di <= w; ++di) {
+        for (int dj = -1; dj <= h; ++dj) {
+            if (di >= 0 && di < w && dj >= 0 && dj < h) continue;   // 跳过建筑内部
+            int nx = i + di, ny = j + dj;
+            if (nx < 0 || nx >= 100 || ny < 0 || ny >= 100) continue;
+            if (m_map[nx][ny] == 10 + RESOURCE_BUSH) return false;
+        }
+    }
+    return true;
+}
+
+// 以 (cx,cy) 为中心、由近到远（半径 0..maxR）找 w×h 空地 → 真正意义上的"建在附近"
+// 【修正背景】原 findBuildBlock 只把 nearX/nearY 当"行优先扫描起点"：
+//   猎物堆/浆果丛周围被树和动物占满时，它会顺着行优先一路扫到几十格以外
+//   → 实测"新建的仓库都不在羚羊堆附近"。现在先在目标点附近找，找不到才由调用方决定是否放弃
+// ============================================================
+bool UsrAI::findBuildBlockNear(const tagInfo& info, int& x, int& y, int w, int h, int cx, int cy, int maxR)
+{
+    for (int r = 0; r <= maxR; ++r) {
+        for (int i = cx - r; i <= cx + r; ++i) {
+            for (int j = cy - r; j <= cy + r; ++j) {
+                if (r > 0 && abs(i - cx) != r && abs(j - cy) != r) continue;   // 只看本圈
+                if (canPlace(info, i, j, w, h)) { x = i; y = j; return true; }
+            }
+        }
+    }
+    return false;
+}
+
+// ============================================================
+// 全局找可建空地（不关心位置）：起点 = 指定附近位置 > 缓存的搜索位置 > 市镇中心附近
+//   nearX/nearY >= 0：先在该点附近 12 格内由近到远找；找不到再退回全局扫描（保底能建出来）
 // ============================================================
 bool UsrAI::findBuildBlock(const tagInfo& info, int& x, int& y, int w, int h, int nearX, int nearY)
 {
     if (info.theMap == nullptr) return false;
-    const auto& terrain = *info.theMap;
 
-    // 起点：指定附近位置 > 缓存的搜索位置 > 市镇中心附近
+    if (nearX >= 0 && nearY >= 0) {
+        if (findBuildBlockNear(info, x, y, w, h, nearX, nearY, 12)) {
+            m_searchX = x;
+            m_searchY = (y + 1 < 100 ? y + 1 : 0);
+            return true;
+        }
+    }
+
     int startX = m_searchX, startY = m_searchY;
-    if (nearX >= 0) {
-        startX = (nearX > 3 ? nearX - 3 : 0);
-        startY = (nearY > 3 ? nearY - 3 : 0);
-    } else if (m_centerX > 0 && startX == 0 && startY == 0) {
+    if (m_centerX > 0 && startX == 0 && startY == 0) {
         startX = (m_centerX > 8 ? m_centerX - 8 : 0);
         startY = (m_centerY > 8 ? m_centerY - 8 : 0);
     }
@@ -284,27 +333,7 @@ bool UsrAI::findBuildBlock(const tagInfo& info, int& x, int& y, int w, int h, in
     for (int pass = 0; pass < 2; ++pass) {
         for (int i = (pass == 0 ? startX : 0); i < 100; ++i) {
             for (int j = (pass == 0 && i == startX ? startY : 0); j < 100; ++j) {
-                if (i + w > 100 || j + h > 100) continue;
-                bool ok = true;
-                int height = terrain[i][j].height;
-                for (int di = 0; di < w && ok; ++di) {
-                    for (int dj = 0; dj < h; ++dj) {
-                        if (m_map[i + di][j + dj] != 0) { ok = false; break; }
-                        if (terrain[i + di][j + dj].height != height) { ok = false; break; }
-                    }
-                }
-                // 外扩 1 圈避开浆果丛：建筑不能紧挨采集点，否则农民采浆果会被卡住
-                if (ok) {
-                    for (int di = -1; di <= w && ok; ++di) {
-                        for (int dj = -1; dj <= h; ++dj) {
-                            if (di >= 0 && di < w && dj >= 0 && dj < h) continue;   // 跳过建筑内部
-                            int nx = i + di, ny = j + dj;
-                            if (nx < 0 || nx >= 100 || ny < 0 || ny >= 100) continue;
-                            if (m_map[nx][ny] == 10 + RESOURCE_BUSH) { ok = false; break; }   // 紧挨浆果丛
-                        }
-                    }
-                }
-                if (ok) {
+                if (canPlace(info, i, j, w, h)) {
                     x = i; y = j;
                     // 下次搜索从当前位置旁边继续，避免反复找到同一块地
                     m_searchX = i;
@@ -957,6 +986,7 @@ void UsrAI::buildBuildings(const tagInfo& info)
         if (!built
             && countBuilding(info, BUILDING_RANGE) > 0
             && countBuilding(info, BUILDING_HOME) >= 6
+            && countBuilding(info, BUILDING_STOCK) < 3
             && info.civilizationStage >= CIVILIZATION_BRONZEAGE
             && info.Wood >= BUILD_STOCK_WOOD) {
             const tagResource* gold = nullptr;
@@ -1084,8 +1114,9 @@ void UsrAI::buildResourceDepots(const tagInfo& info)
     if (needStock && farPrey != nullptr) {
         int gx = (int)(farPrey->DR / BLOCKSIDELENGTH);
         int gy = (int)(farPrey->UR / BLOCKSIDELENGTH);
+        // 【修正】必须建在猎物堆 8 格内；附近实在没空地 → 这帧不建（绝不建到很远的地方）
         int x, y;
-        if (findBuildBlock(info, x, y, 3, 3, gx, gy)) {
+        if (findBuildBlockNear(info, x, y, 3, 3, gx, gy, 8)) {
             HumanBuild(m_depotBuilderSN, BUILDING_STOCK, x, y);
             m_issued.insert(m_depotBuilderSN);
             return;
@@ -1094,8 +1125,9 @@ void UsrAI::buildResourceDepots(const tagInfo& info)
     if (needGranary && farBush != nullptr) {
         int gx = (int)(farBush->DR / BLOCKSIDELENGTH);
         int gy = (int)(farBush->UR / BLOCKSIDELENGTH);
+        // 【修正】必须建在浆果丛 8 格内；附近实在没空地 → 这帧不建
         int x, y;
-        if (findBuildBlock(info, x, y, 3, 3, gx, gy)) {
+        if (findBuildBlockNear(info, x, y, 3, 3, gx, gy, 8)) {
             HumanBuild(m_depotBuilderSN, BUILDING_GRANARY, x, y);
             m_issued.insert(m_depotBuilderSN);
             return;
