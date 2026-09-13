@@ -379,10 +379,9 @@ void UsrAI::manageVillagers(const tagInfo& info)
         if (info.Wood < 60) targetWood = 4;     // 严重不足加 2 人
     }
     int targetStone = 1;
-    // 【3.0.7g 调整】初始石头 300→150，只够建 1 座箭塔（150石/座）；
-    //   第二波前要 3 座塔需再挖 300 石 → 第一波后（人手充裕时）加派 1 人挖石备料
-    //   （开局不加人：保持 4浆果+2砍树+1挖石，避免挤占经济拖慢升级）
-    if (info.GameFrame > FRAME_WAVE1 && countBuilding(info, BUILDING_ARROWTOWER) < 3) targetStone = 2;
+    // 【3.0.7g 新策略】塔上限 2 座：初始石头 150 建第 1 座，第 2 座需再挖 150 石
+    //   第一波后（人手充裕）且塔不足 2 座时加派 1 人挖石；建成后回到 1 人
+    if (info.GameFrame > FRAME_WAVE1 && countBuilding(info, BUILDING_ARROWTOWER) < 2) targetStone = 2;
     // 【3.0.7g 调整】金矿 200→400（翻倍）→ 黄金更充裕，挖金保持 3 人
     int targetGold = bronze ? 3 : 0;            // 铜器后挖金，为造兵准备
 
@@ -1147,6 +1146,9 @@ void UsrAI::researchTech(const tagInfo& info)
             break;
         }
         case BUILDING_STOCK: {
+            // 【3.0.7g 新策略】主力兵种科技是否已解锁（阔剑 或 复合弓）——未解锁前护甲科技让位
+            const bool unitTechReady = (m_researchCount[BUILDING_ARMYCAMP_UPGRADE_BROADSWORD] > 0
+                                        || m_researchCount[BUILDING_RANGE_UPGRADE_COMPOSITE_BOW] > 0);
             // 工具使用（近战攻击+2）→ 金属加工（铜器，攻击再+2）
             int ut = m_researchCount[BUILDING_STOCK_UPGRADE_USETOOL];
             if (ut == 0 && info.Meat >= BUILDING_STOCK_UPGRADE_CLOSER_ATTACK_FOOD) {
@@ -1163,7 +1165,9 @@ void UsrAI::researchTech(const tagInfo& info)
                 break;
             }
             // 步兵护甲
-            if (m_researchCount[BUILDING_STOCK_UPGRADE_DEFENSE_INFANTRY] == 0
+            // 【3.0.7g 新策略】护甲科技让位：先保证主力兵种科技（阔剑/复合弓）解锁，食物紧张
+            if (bronze && unitTechReady
+                && m_researchCount[BUILDING_STOCK_UPGRADE_DEFENSE_INFANTRY] == 0
                 && info.Meat >= BUILDING_STOCK_UPGRADE_DEFENSE_INFANTRY_FOOD) {
                 BuildingAction(b.SN, BUILDING_STOCK_UPGRADE_DEFENSE_INFANTRY);
                 m_issued.insert(b.SN);
@@ -1171,7 +1175,8 @@ void UsrAI::researchTech(const tagInfo& info)
                 break;
             }
             // 弓兵护甲
-            if (m_researchCount[BUILDING_STOCK_UPGRADE_DEFENSE_ARCHER] == 0
+            if (bronze && unitTechReady
+                && m_researchCount[BUILDING_STOCK_UPGRADE_DEFENSE_ARCHER] == 0
                 && info.Meat >= BUILDING_STOCK_UPGRADE_DEFENSE_ARCHER_FOOD) {
                 BuildingAction(b.SN, BUILDING_STOCK_UPGRADE_DEFENSE_ARCHER);
                 m_issued.insert(b.SN);
@@ -1179,7 +1184,8 @@ void UsrAI::researchTech(const tagInfo& info)
                 break;
             }
             // 骑兵护甲
-            if (m_researchCount[BUILDING_STOCK_UPGRADE_DEFENSE_RIDER] == 0
+            if (bronze && unitTechReady
+                && m_researchCount[BUILDING_STOCK_UPGRADE_DEFENSE_RIDER] == 0
                 && info.Meat >= BUILDING_STOCK_UPGRADE_DEFENSE_RIDER_FOOD) {
                 BuildingAction(b.SN, BUILDING_STOCK_UPGRADE_DEFENSE_RIDER);
                 m_issued.insert(b.SN);
@@ -1243,31 +1249,39 @@ void UsrAI::trainArmy(const tagInfo& info)
         if (m_issued.count(b.SN)) continue;                        // 本帧已下令
         switch (b.Type) {
         case BUILDING_ARMYCAMP:
-            // 铜器后优先阔剑兵（需科技），否则棍棒兵
+            // 【3.0.7g 新策略】黄金系精兵：本版金矿 200→400 翻倍，黄金充裕而食物紧张
+            // 铜器后：阔剑兵（35食+15金，便宜且强）；未升级前：棍棒兵最多 2 个（省食物升铜器）
             if (bronze && m_researchCount[BUILDING_ARMYCAMP_UPGRADE_BROADSWORD] > 0
                 && info.Meat >= BUILDING_ARMYCAMP_CREATE_BROADSWORD_FOOD && info.Gold >= 15) {
                 BuildingAction(b.SN, BUILDING_ARMYCAMP_CREATE_BROADSWORD);
                 m_issued.insert(b.SN);
-            } else if (info.GameFrame < FRAME_WAVE2 && countArmy(info, AT_CLUBMAN) >= 2) {
-                // 第二波前棍棒兵只留 2 个：省食物给升级铜器/铜器兵，防止造太多吃光食物
+            } else if (!bronze && countArmy(info, AT_CLUBMAN) >= 2) {
+                // 未升级：棍棒兵只留 2 个（守第一波），其余食物留给 800 升级
+            } else if (bronze) {
+                // 铜器后科技未好：也不量产弱兵，等阔剑科技
             } else if (info.Meat >= BUILDING_ARMYCAMP_CREATE_CLUBMAN_FOOD) {
                 BuildingAction(b.SN, BUILDING_ARMYCAMP_CREATE_CLUBMAN);
                 m_issued.insert(b.SN);
             }
             break;
         case BUILDING_RANGE:
-            // 铜器后优先复合弓兵（需科技），否则弓箭手
+            // 【3.0.7g 新策略】铜器后复合弓兵（40食+20金，远程主力）；未升级前弓箭手最多 2 个
             if (bronze && m_researchCount[BUILDING_RANGE_UPGRADE_COMPOSITE_BOW] > 0
                 && info.Meat >= BUILDING_RANGE_CREATE_COMPOSITE_BOWMAN_FOOD && info.Gold >= 20) {
                 BuildingAction(b.SN, BUILDING_RANGE_CREATE_COMPOSITE_BOWMAN);
                 m_issued.insert(b.SN);
+            } else if (!bronze && countArmy(info, AT_BOWMAN) >= 2) {
+                // 未升级：弓箭手只留 2 个（省食物/木头给升级与建筑）
+            } else if (bronze) {
+                // 铜器后等复合弓科技
             } else if (info.Meat >= BUILDING_RANGE_CREATE_BOWMAN_FOOD && info.Wood >= 20) {
                 BuildingAction(b.SN, BUILDING_RANGE_CREATE_BOWMAN);
                 m_issued.insert(b.SN);
             }
             break;
         case BUILDING_STABLE:
-            // 保持 1 个侦察骑兵探路，其余铜器后造骑兵
+            // 【3.0.7g 新策略】骑兵为主力（70食+80金，150血/速度4，克步兵且能救祭司）
+            //   · 保留 1 个侦察骑兵探路
             if (countArmy(info, AT_SCOUT) < 1 && info.Meat >= BUILDING_STABLE_CREATE_SCOUT_FOOD) {
                 BuildingAction(b.SN, BUILDING_STABLE_CREATE_SCOUT);
                 m_issued.insert(b.SN);
@@ -1277,8 +1291,8 @@ void UsrAI::trainArmy(const tagInfo& info)
             }
             break;
         case BUILDING_COLLAGE:
-            // 方阵兵（铜器强力步兵）
-            if (info.Meat >= BUILDING_COLLAGE_CREATE_HOPLITE_FOOD && info.Gold >= 40) {
+            // 【3.0.7g 新策略】方阵兵（60食+40金，120血/17攻，正面肉盾）——金矿翻倍后负担得起
+            if (bronze && info.Meat >= BUILDING_COLLAGE_CREATE_HOPLITE_FOOD && info.Gold >= 40) {
                 BuildingAction(b.SN, BUILDING_COLLAGE_CREATE_HOPLITE);
                 m_issued.insert(b.SN);
             }
@@ -1304,7 +1318,10 @@ void UsrAI::buildArrowTower(const tagInfo& info)
         towerCount++;
         if (towerCount == 1) { towerX = b.BlockDR; towerY = b.BlockUR; }
     }
-    if (towerCount >= 3 || towerCount == 0) return;   // 已有三座 / 第一座还没建
+    // 【3.0.7g 新策略】箭塔上限 2 座（旧策略 3 座）：
+    //   本版初始石头仅 150（=1座塔），且第三波有 2 辆投石车（射程10 > 塔射程8）专拆塔
+    //   → 塔多反成负担；省下的石头/人力投入科技与精兵
+    if (towerCount >= 2 || towerCount == 0) return;   // 已有两座 / 第一座还没建
     if (info.Stone < BUILD_ARROWTOWER_STONE) return;  // 石头不足
 
     // 找一个空闲农民来建造
@@ -1490,8 +1507,12 @@ void UsrAI::defense(const tagInfo& info)
                     if (e.WorkObjectSN == priestSN) { candidates.push_back(e.SN); break; }
             }
             if (candidates.empty()) {
+                // 【3.0.7g 新策略】祭司特攻单位 + 投石车：
+                //   战车弓/四马战车对祭司 +7；投石车射程10 > 塔射程8，第三波 2 辆专拆塔
+                //   → 都是必须先杀的高危目标
                 for (const tagArmy& e : info.enemy_armies)
-                    if (e.Sort == AT_CHARIOT_ARCHER || e.Sort == AT_CHARIOT)
+                    if (e.Sort == AT_CHARIOT_ARCHER || e.Sort == AT_CHARIOT
+                        || e.Sort == AT_STONE_THROWER)
                         candidates.push_back(e.SN);
             }
             if (!candidates.empty()) {
