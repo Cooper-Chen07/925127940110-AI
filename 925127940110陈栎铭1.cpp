@@ -449,8 +449,9 @@ void UsrAI::manageVillagers(const tagInfo& info)
             }
         }
         // ② 木头（正常2人，按需动态）；专属食物采集者不砍树（只做食物）
+        //    分散选树：避免两个樵夫扎堆同一棵/相邻树互相卡住
         if (!isFood && woodCnt < targetWood) {
-            int sn = findNearestResource(info, RESOURCE_TREE, f.SN);
+            int sn = findNearestTree(info, f.SN);
             if (sn >= 0) {
                 HumanAction(f.SN, sn);
                 m_issued.insert(f.SN);
@@ -526,7 +527,7 @@ void UsrAI::manageVillagers(const tagInfo& info)
         //    专属食物采集者：先找安全食物（打猎/采尸）；打不了（如大象人数不足/猎物满员）
         //    → 也去砍树/挖资源——宁可干别的也不站着等（防"空闲村民不动"）
         int sn = findNearestHunt(info, f.SN);
-        if (sn < 0) sn = findNearestResource(info, RESOURCE_TREE, f.SN);
+        if (sn < 0) sn = findNearestTree(info, f.SN);
         if (sn >= 0) {
             HumanAction(f.SN, sn);
             m_issued.insert(f.SN);
@@ -671,6 +672,49 @@ int UsrAI::countArmy(const tagInfo& info, int sort) const
     for (const tagArmy& a : info.armies)
         if (a.Sort == sort) cnt++;
     return cnt;
+}
+
+// 找砍树的树：分散选树，避免两个樵夫扎堆同一棵/相邻的树互相卡住
+//   · 统计每棵树已被几个农民使用（WORKING/WALKING 指向它）
+//   · 树与树距离很近时视为同一组（树是静态障碍，贴着采会卡采集位）
+//   · 优先选"使用人数最少"的树；人数相同选更近的
+int UsrAI::findNearestTree(const tagInfo& info, int farmerSN)
+{
+    const tagFarmer* f = nullptr;
+    for (const tagFarmer& ff : info.farmers)
+        if (ff.SN == farmerSN) { f = &ff; break; }
+    if (f == nullptr) return -1;
+
+    // 统计每棵树的使用人数
+    std::unordered_map<int,int> cnt;
+    for (const tagFarmer& w : info.farmers)
+        if (w.NowState == HUMAN_STATE_WORKING || w.NowState == HUMAN_STATE_WALKING)
+            cnt[w.WorkObjectSN]++;
+
+    // 收集所有树（含剩余量的）
+    std::vector<const tagResource*> trees;
+    for (const tagResource& r : info.resources)
+        if (r.Type == RESOURCE_TREE && r.Cnt > 0) trees.push_back(&r);
+    if (trees.empty()) return -1;
+
+    int bestSn = -1;
+    double bestScore = 1e18;
+    for (const tagResource* t : trees) {
+        int c = cnt[t->SN];
+        // 离这个农民很近的树（<6格）有人占了 → 换更远的（避免贴身挤采集位）
+        double d = calDistance(f->DR, f->UR, t->DR, t->UR);
+        double score = (double)c * 10.0 * BLOCKSIDELENGTH + d;   // 人数权重远大于距离 → 先分散
+        if (c >= 2) continue;                                     // 一棵树最多 2 人
+        if (score < bestScore) { bestScore = score; bestSn = t->SN; }
+    }
+    if (bestSn >= 0) return bestSn;
+    // 所有树都 ≥2 人（树少人多）→ 退而求其次选最近的（总比闲着好）
+    double bestD = 1e18;
+    for (const tagResource* t : trees) {
+        double d = calDistance(f->DR, f->UR, t->DR, t->UR);
+        if (d < bestD) { bestD = d; bestSn = t->SN; }
+    }
+    return bestSn;
 }
 
 // ============================================================
@@ -1418,50 +1462,64 @@ void UsrAI::defense(const tagInfo& info)
         if (m_issued.count(a.SN)) continue;                         // 本帧已下令
 
         if (enemyVisible) {
-            // 0) 战车弓兵转火：视野内有战车弓兵就优先打它（专杀祭司，最高优先）
-            //    分散攻击：统计每个战车弓兵已被几个己方兵锁定 → 优先打"被攻击最少"的，
-            //    避免全军集火一个、另一个无人拉仇恨一直射祭司
-            //    （若都被锁定 ≥1 人，则打最近的）
-            // 统计每个战车弓兵正被几个己方兵锁定
-            std::unordered_map<int,int> chariotLocked;
-            for (const tagArmy& my : info.armies) {
-                if (my.Sort == AT_PRIEST || my.Sort == AT_SCOUT) continue;
-                if (my.WorkObjectSN <= 0) continue;
+            // 0) 保祭司转火：谁正在打祭司就打谁（第三波战车弓/四马战车/复合弓都可能集火祭司）
+            //    判定：敌人 WorkObjectSN == 我方祭司 SN → 它正在攻击祭司
+            //    其次：视野内的祭司特攻单位（战车弓兵/四马战车，对祭司+7）——潜在杀祭司威胁
+            //    分散攻击：统计候选已被几个己方兵锁定 → 优先打"被攻击最少"的，
+            //    避免全军集火一个、另一个无人拉仇恨继续打祭司
+            int priestSN = (priest != nullptr) ? priest->SN : -1;
+            // 候选集合：正在打祭司的敌人 > 祭司特攻单位（战车弓/四马战车）
+            std::vector<int> candidates;
+            if (priestSN >= 0) {
                 for (const tagArmy& e : info.enemy_armies)
-                    if (e.Sort == AT_CHARIOT_ARCHER && e.SN == my.WorkObjectSN) {
-                        chariotLocked[e.SN]++;
-                        break;
-                    }
+                    if (e.WorkObjectSN == priestSN) { candidates.push_back(e.SN); break; }
             }
-            int chariot = -1;
-            int chariotCnt = 0x7fffffff;
-            double chariotD = 1e18;
-            for (const tagArmy& e : info.enemy_armies) {
-                if (e.Sort != AT_CHARIOT_ARCHER) continue;
-                int locked = chariotLocked[e.SN];
-                double d = calDistance(a.DR, a.UR, e.DR, e.UR);
-                // 被锁定更少的优先；同锁定数取更近的
-                if (locked < chariotCnt || (locked == chariotCnt && d < chariotD)) {
-                    chariotCnt = locked;
-                    chariotD = d;
-                    chariot = e.SN;
-                }
-            }
-            if (chariot >= 0) {
-                // 当前正在打战车弓兵 → 不打断
-                bool attackingChariot = false;
+            if (candidates.empty()) {
                 for (const tagArmy& e : info.enemy_armies)
-                    if (e.SN == a.WorkObjectSN) { attackingChariot = true; break; }
-                if (!attackingChariot) {
-                    auto it = m_armySwitch.find(a.SN);
-                    if (it == m_armySwitch.end() || info.GameFrame - it->second >= 30) {
-                        HumanAction(a.SN, chariot);          // 转火：正在打的也拉去打战车弓兵
-                        m_issued.insert(a.SN);
-                        m_armySwitch[a.SN] = info.GameFrame;
-                        continue;
+                    if (e.Sort == AT_CHARIOT_ARCHER || e.Sort == AT_CHARIOT)
+                        candidates.push_back(e.SN);
+            }
+            if (!candidates.empty()) {
+                // 统计每个候选正被几个己方兵锁定
+                std::unordered_map<int,int> candLocked;
+                for (const tagArmy& my : info.armies) {
+                    if (my.Sort == AT_PRIEST || my.Sort == AT_SCOUT) continue;
+                    if (my.WorkObjectSN <= 0) continue;
+                    for (int csn : candidates)
+                        if (csn == my.WorkObjectSN) { candLocked[csn]++; break; }
+                }
+                int savior = -1;
+                int saviorCnt = 0x7fffffff;
+                double saviorD = 1e18;
+                for (int csn : candidates) {
+                    const tagArmy* ce = nullptr;
+                    for (const tagArmy& e : info.enemy_armies)
+                        if (e.SN == csn) { ce = &e; break; }
+                    if (ce == nullptr) continue;
+                    int locked = candLocked[csn];
+                    double d = calDistance(a.DR, a.UR, ce->DR, ce->UR);
+                    if (locked < saviorCnt || (locked == saviorCnt && d < saviorD)) {
+                        saviorCnt = locked;
+                        saviorD = d;
+                        savior = csn;
                     }
                 }
-                continue;   // 已在打战车弓兵 → 本帧不管
+                if (savior >= 0) {
+                    // 当前正在打它 → 不打断
+                    bool already = false;
+                    for (const tagArmy& e : info.enemy_armies)
+                        if (e.SN == a.WorkObjectSN) { already = true; break; }
+                    if (!already) {
+                        auto it = m_armySwitch.find(a.SN);
+                        if (it == m_armySwitch.end() || info.GameFrame - it->second >= 30) {
+                            HumanAction(a.SN, savior);          // 转火救祭司
+                            m_issued.insert(a.SN);
+                            m_armySwitch[a.SN] = info.GameFrame;
+                            continue;
+                        }
+                    }
+                    continue;   // 已在打 → 本帧不管
+                }
             }
         }
         if (a.NowState != HUMAN_STATE_IDLE) continue;               // 已在战斗的不重复下令
@@ -1614,15 +1672,23 @@ void UsrAI::handlePriest(const tagInfo& info)
     if (priest == nullptr) return;                  // 祭司不存在（死亡=游戏失败）
 
     // 1.5) 被攻击检测：血量比上一帧下降 → 判定正在挨打
-    //      走位条件：有军队 +（血量低 <60% 或 没在转化）
-    //      转化中血量健康时不打断（转化受攻击不会自动断，是我们的走位打断了它）
+    //      走位打断规则（关键：转化不能被打断，否则 2~6 秒施法白费、屡屡不成功）：
+    //      · 转化中（convertingNow，或刚下令 30 帧内快照未更新）→ 只有濒死(<25%)才走位打断
+    //        —— 转化就是把打自己的敌人转化掉，是最佳自救，坚持走完
+    //      · 没在转化 → 低血(<60%) 才走位躲避（保命）
     bool beingHit = (m_priestLastBlood > 0 && priest->Blood < m_priestLastBlood);
     m_priestLastBlood = priest->Blood;
     bool convertingNow = false;
     for (const tagArmy& e : info.enemy_armies)
         if (e.SN == priest->WorkObjectSN) { convertingNow = true; break; }
-    bool lowBlood = (priest->Blood < priest->MaxBlood * 3 / 5);
-    if (beingHit && !info.enemy_armies.empty() && (lowBlood || !convertingNow)) {
+    // 快照延迟补偿：刚下令转化（30帧内）主线程快照可能还没把 WorkObjectSN 传回来
+    bool justOrderedConvert = (m_convertStartFrame >= 0
+                               && info.GameFrame - m_convertStartFrame < 30);
+    bool inConversion = convertingNow || justOrderedConvert;
+    bool lowBlood = (priest->Blood < priest->MaxBlood * 3 / 5);      // <60%
+    bool criticalBlood = (priest->Blood < priest->MaxBlood / 4);     // <25% 濒死
+    if (beingHit && !info.enemy_armies.empty()
+        && (criticalBlood || (!inConversion && lowBlood))) {
         // 走位目标 = 固定安全位（塔下/市中心，getPriestHome）：挨打就往安全位撤，到位即停
         // （不用"塔+敌人反方向偏移"——敌人位置每帧变 → 目标抖动 → 每帧重新下令）
         int hx, hy;
@@ -1631,8 +1697,8 @@ void UsrAI::handlePriest(const tagInfo& info)
         double gy = (double)hy * BLOCKSIDELENGTH;
         // 节流下令：60帧内目标不变不重复下令（防每帧打断移动/挤掉转化指令）
         bool ordered = movePriest(priestSN, priest->DR, priest->UR, gx, gy, info.GameFrame);
-        if (ordered || lowBlood) return;   // 已下令，或血量低（保命优先）→ 本帧不再转化
-        // 血量健康且节流期内：不 return → 把本帧让给转化逻辑
+        if (ordered || criticalBlood) return;   // 已下令，或濒死 → 本帧不再转化
+        // 转化中被打但没到濒死：不 return → 把本帧让给转化逻辑（转化继续走完）
     }
 
     // 2) 寻找转化候选（分阶段策略）

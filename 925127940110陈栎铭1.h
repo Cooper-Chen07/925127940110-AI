@@ -58,6 +58,7 @@ private:
     void manageVillagers(const tagInfo& info);   // 农民分配：食物优先（浆果/打猎/种田）动态配额
     int  findNearestResource(const tagInfo& info, int type, int farmerSN); // 找最近指定资源
     int  findNearestHunt(const tagInfo& info, int farmerSN);               // 打猎：随机选目标（尸体优先，防扎堆）
+    int  findNearestTree(const tagInfo& info, int farmerSN);               // 砍树：分散选树（防两樵夫扎堆卡住）
     int  findNearestFarm(const tagInfo& info, int farmerSN);               // 找最近可种农田
     int  countBuilding(const tagInfo& info, int type) const;                     // 统计已建成建筑数
     int  countArmy(const tagInfo& info, int sort) const;                         // 统计我方某兵种数量
