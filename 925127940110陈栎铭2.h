@@ -60,6 +60,13 @@ private:
     int  findNearestHunt(const tagInfo& info, int farmerSN);               // 打猎：随机选目标（尸体优先，防扎堆）
     int  findNearestTree(const tagInfo& info, int farmerSN);               // 砍树：分散选树（防两樵夫扎堆卡住）
     int  findNearestFarm(const tagInfo& info, int farmerSN);               // 找最近可种农田
+    bool m_huntWaiting = false;                  // 想打猎但缺搭档 → 原地等待第二个农民生成后再一起派
+    std::unordered_map<int,int> m_badTarget;     // 资源SN -> 判定"卡住/不可达"的帧（600帧内不再选它）
+    bool isBadTarget(int sn, int frame) const    // 该目标近期是否被判过"卡住/不可达"
+    {
+        auto it = m_badTarget.find(sn);
+        return (it != m_badTarget.end()) && (frame - it->second < 600);
+    }
     int  countBuilding(const tagInfo& info, int type) const;                     // 统计已建成建筑数
     int  countArmy(const tagInfo& info, int sort) const;                         // 统计我方某兵种数量
 
