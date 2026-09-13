@@ -428,6 +428,8 @@ void UsrAI::manageVillagers(const tagInfo& info)
 
         // 非空闲农民：检查工作目标是否仍然有效（存在且有剩余），并检测寻路卡住
         if (f.NowState != HUMAN_STATE_IDLE) {
+            m_orderFrame.erase(f.SN);       // 已经动起来了 → 上次下令生效，清掉防刷屏记录
+            m_orderTarget.erase(f.SN);
             bool valid = false;
             for (const tagResource& r : info.resources)
                 if (r.SN == f.WorkObjectSN && r.Cnt > 0) { valid = true; break; }
@@ -454,33 +456,66 @@ void UsrAI::manageVillagers(const tagInfo& info)
                 }
                 bool stuck = false;
                 bool suspect = false;              // 是否处于"可疑计时中"（计时存在 m_moveStart 里）
+                // 【修复·关键】卡住判定必须看"有没有在靠近"：
+                //   原先只看"状态 + 距离 + 帧数"，村民走向远处的树时状态已是 WORKING，
+                //   100 帧后就被当成卡住 → 反复改目标 → 界面一直刷"设置工作目标为 树 X"。
+                //   现在：距离在缩小 = 有进展（重置计时）；只有"原地不动"累计到超时才判卡住。
                 if (hasTarget) {
                     double tDist = calDistance(f.DR, f.UR, targetDR, targetUR);
-                    if (f.NowState == HUMAN_STATE_WALKING) {
-                        int timeout = 0;
+                    bool inCooldown = false;
+                    {
+                        auto cf = m_stuckFrame.find(f.SN);
+                        if (cf != m_stuckFrame.end() && info.GameFrame - cf->second < 300)
+                            inCooldown = true;     // 刚判过他卡住 → 300 帧内不再判，给他时间走过去
+                    }
+                    int timeout = 0;
+                    if (!inCooldown && f.NowState == HUMAN_STATE_WALKING) {
                         if (tDist < 15.0 * BLOCKSIDELENGTH) timeout = isAnimal ? 60 : 120;
                         else if (!isAnimal && tDist < 28.0 * BLOCKSIDELENGTH) timeout = 400;
-                        if (timeout > 0) {
-                            suspect = true;            // 近距离走路 → 开始计时
-                            auto it = m_moveStart.find(f.SN);
-                            if (it == m_moveStart.end()) m_moveStart[f.SN] = info.GameFrame;
-                            else if (info.GameFrame - it->second > timeout) stuck = true;
-                        }
-                    } else if (f.NowState == HUMAN_STATE_WORKING && !isAnimal
-                               && tDist > 3.0 * BLOCKSIDELENGTH) {
-                        // 说在干活却离资源 >3 格 → 连续 100 帧（4 秒）都这样才判卡住（防误判）
+                    } else if (!inCooldown && f.NowState == HUMAN_STATE_WORKING
+                               && !isAnimal && tDist > 3.0 * BLOCKSIDELENGTH) {
+                        timeout = 150;             // 说在干活却离资源很远
+                    }
+                    if (timeout > 0) {
                         suspect = true;
                         auto it = m_moveStart.find(f.SN);
-                        if (it == m_moveStart.end()) m_moveStart[f.SN] = info.GameFrame;
-                        else if (info.GameFrame - it->second > 100) stuck = true;
+                        auto id = m_lastDist.find(f.SN);
+                        if (it == m_moveStart.end() || id == m_lastDist.end()) {
+                            m_moveStart[f.SN] = info.GameFrame;
+                            m_lastDist[f.SN] = tDist;
+                        } else if (tDist < id->second - 0.2 * BLOCKSIDELENGTH) {
+                            m_moveStart[f.SN] = info.GameFrame;   // 在靠近 → 有进展，重置计时
+                            m_lastDist[f.SN] = tDist;
+                        } else {
+                            m_lastDist[f.SN] = tDist;
+                            if (info.GameFrame - it->second > timeout) stuck = true;
+                        }
                     }
                 }
-                if (!suspect) { m_moveStart.erase(f.SN); continue; }   // 正常工作/远处目标 → 不打扰
+                if (!suspect) { m_moveStart.erase(f.SN); m_lastDist.erase(f.SN); continue; }
                 if (!stuck) continue;                                  // 还在计时 → 继续观察
                 m_moveStart.erase(f.SN);
+                m_lastDist.erase(f.SN);
+                m_stuckFrame[f.SN] = info.GameFrame;                   // 冷却 300 帧，防反复改目标
                 if (hasTarget) m_badTarget[f.WorkObjectSN] = info.GameFrame;   // 拉黑，换目标
             }
             // 目标失效或卡住 → 掉下去重新分配（新指令覆盖旧目标）
+        }
+
+        // 【防刷屏·关键】IDLE 农民 + 刚下过采集令 = 引擎没接受这条指令（目标不可达/被挡住）
+        //   IDLE 状态不会进入上面的卡住检测，若不拦就会每帧重下令
+        //   → 调试文本疯狂刷 "设置工作目标为 树 X"（实测现象："一直在将树设置为目标"）。
+        //   做法：120 帧内不重复下令；超过 120 帧仍是 IDLE → 把上次那个目标拉黑，换一个目标。
+        {
+            auto of = m_orderFrame.find(f.SN);
+            if (of != m_orderFrame.end()) {
+                if (info.GameFrame - of->second < 120) continue;   // 宽限期内 → 本帧不打扰
+                auto ot = m_orderTarget.find(f.SN);
+                if (ot != m_orderTarget.end() && ot->second > 0)
+                    m_badTarget[ot->second] = info.GameFrame;      // 目标不可达 → 拉黑换目标
+                m_orderFrame.erase(f.SN);
+                m_orderTarget.erase(f.SN);
+            }
         }
 
         // 【修复·关键】重新分配前先"留在原工种"（实测：伐木的人到后面只剩一个）
@@ -496,6 +531,7 @@ void UsrAI::manageVillagers(const tagInfo& info)
             if (ksn >= 0) {
                 HumanAction(f.SN, ksn);
                 m_issued.insert(f.SN);
+                m_orderTarget[f.SN] = ksn; m_orderFrame[f.SN] = info.GameFrame;
                 woodCnt++;
                 continue;
             }
@@ -505,6 +541,7 @@ void UsrAI::manageVillagers(const tagInfo& info)
             if (gsn >= 0) {
                 HumanAction(f.SN, gsn);
                 m_issued.insert(f.SN);
+                m_orderTarget[f.SN] = gsn; m_orderFrame[f.SN] = info.GameFrame;
                 goldCnt++;
                 continue;
             }
@@ -526,6 +563,7 @@ void UsrAI::manageVillagers(const tagInfo& info)
             if (bestSn >= 0) {
                 HumanAction(f.SN, bestSn);
                 m_issued.insert(f.SN);
+                m_orderTarget[f.SN] = bestSn; m_orderFrame[f.SN] = info.GameFrame;
                 m_foodGatherers.insert(f.SN);   // 标记专属食物采集
                 m_role[f.SN] = 1;                // 工种：浆果
                 berryCnt++;
@@ -540,6 +578,7 @@ void UsrAI::manageVillagers(const tagInfo& info)
             if (sn >= 0) {
                 HumanAction(f.SN, sn);
                 m_issued.insert(f.SN);
+                m_orderTarget[f.SN] = sn; m_orderFrame[f.SN] = info.GameFrame;
                 m_role[f.SN] = 2;                // 工种：伐木（采完树后优先回来伐木）
                 woodCnt++;
                 continue;
@@ -551,6 +590,7 @@ void UsrAI::manageVillagers(const tagInfo& info)
             if (sn >= 0) {
                 HumanAction(f.SN, sn);
                 m_issued.insert(f.SN);
+                m_orderTarget[f.SN] = sn; m_orderFrame[f.SN] = info.GameFrame;
                 stoneCnt++;
                 continue;
             }
@@ -564,6 +604,7 @@ void UsrAI::manageVillagers(const tagInfo& info)
             if (sn >= 0) {
                 HumanAction(f.SN, sn);
                 m_issued.insert(f.SN);
+                m_orderTarget[f.SN] = sn; m_orderFrame[f.SN] = info.GameFrame;
                 m_foodGatherers.insert(f.SN);   // 打猎也标记专属
                 m_role[f.SN] = 4;                // 工种：打猎
                 foodCnt++;
@@ -597,6 +638,7 @@ void UsrAI::manageVillagers(const tagInfo& info)
                 if (farmSN >= 0) {
                     HumanAction(f.SN, farmSN);
                     m_issued.insert(f.SN);
+                    m_orderTarget[f.SN] = farmSN; m_orderFrame[f.SN] = info.GameFrame;
                     m_foodGatherers.insert(f.SN);
                     m_role[f.SN] = 5;            // 工种：农田
                     foodCnt++;
@@ -612,6 +654,7 @@ void UsrAI::manageVillagers(const tagInfo& info)
             if (sn >= 0) {
                 HumanAction(f.SN, sn);
                 m_issued.insert(f.SN);
+                m_orderTarget[f.SN] = sn; m_orderFrame[f.SN] = info.GameFrame;
                 m_role[f.SN] = 3;                // 工种：采金
                 goldCnt++;
                 continue;
@@ -631,6 +674,7 @@ void UsrAI::manageVillagers(const tagInfo& info)
         if (sn >= 0) {
             HumanAction(f.SN, sn);
             m_issued.insert(f.SN);
+            m_orderTarget[f.SN] = sn; m_orderFrame[f.SN] = info.GameFrame;
             m_role[f.SN] = newRole;
         }
     }

@@ -60,6 +60,10 @@ private:
     std::set<int> m_issued;                      // 本帧已下令的对象 SN（防重复下令）
     int m_builderSN = -1;                        // 专职建造村民 SN（保证建筑能建起来）
     std::unordered_map<int,int> m_moveStart;     // 农民SN -> 开始移动帧（寻路卡住检测）
+    std::unordered_map<int,double> m_lastDist;   // 农民SN -> 上帧到目标的距离（判断"有没有在靠近"）
+    std::unordered_map<int,int> m_stuckFrame;    // 农民SN -> 上次判卡住的帧（冷却 300 帧，防反复改目标）
+    std::unordered_map<int,int> m_orderFrame;    // 农民SN -> 上次下采集令的帧（IDLE 防刷屏）
+    std::unordered_map<int,int> m_orderTarget;   // 农民SN -> 上次下采集令的目标SN（不可达时拉黑它）
     void manageVillagers(const tagInfo& info);   // 农民分配：食物优先（浆果/打猎/种田）动态配额
     int  findNearestResource(const tagInfo& info, int type, int farmerSN); // 找最近指定资源
     int  findNearestHunt(const tagInfo& info, int farmerSN);               // 打猎：随机选目标（尸体优先，防扎堆）
