@@ -428,8 +428,6 @@ void UsrAI::manageVillagers(const tagInfo& info)
 
         // 非空闲农民：检查工作目标是否仍然有效（存在且有剩余），并检测寻路卡住
         if (f.NowState != HUMAN_STATE_IDLE) {
-            m_orderFrame.erase(f.SN);       // 已经动起来了 → 上次下令生效，清掉防刷屏记录
-            m_orderTarget.erase(f.SN);
             bool valid = false;
             for (const tagResource& r : info.resources)
                 if (r.SN == f.WorkObjectSN && r.Cnt > 0) { valid = true; break; }
@@ -502,19 +500,54 @@ void UsrAI::manageVillagers(const tagInfo& info)
             // 目标失效或卡住 → 掉下去重新分配（新指令覆盖旧目标）
         }
 
-        // 【防刷屏·关键】IDLE 农民 + 刚下过采集令 = 引擎没接受这条指令（目标不可达/被挡住）
-        //   IDLE 状态不会进入上面的卡住检测，若不拦就会每帧重下令
-        //   → 调试文本疯狂刷 "设置工作目标为 树 X"（实测现象："一直在将树设置为目标"）。
-        //   做法：120 帧内不重复下令；超过 120 帧仍是 IDLE → 把上次那个目标拉黑，换一个目标。
+        // 【防重复下令·关键】覆盖"所有即将重新分配"的农民（IDLE、目标已采完、判卡住三种）
+        //   实测现象：农民 41226 每帧重发"设置工作目标为 树 50997"（界面/日志刷屏）。
+        //   原因：引擎没接受这条采集指令（目标不可达/被挡住）时，农民位置和状态都不变，
+        //         而目标一直被判定为无效 → 每帧掉进优先级链重新派树。
+        //   判据：上次下令后他有没有挪动过（m_orderX/m_orderY 记录下单时的位置）。
+        //     · 动过   → 指令生效了（目标被采完等正常情况）→ 立刻允许重新分配
+        //     · 没动过 + 距下令 < 120 帧 → 指令被忽略 → 本帧不重复下令
+        //     · 没动过 + 已超 120 帧     → 上次那个目标不可达 → 拉黑换一个，再给他一次机会
         {
+            // 【脱困中】正在强制回家重置寻路的农民：给 180 帧走过去，期间不重新分配
+            auto rf = m_recoverFrame.find(f.SN);
+            if (rf != m_recoverFrame.end()) {
+                if (info.GameFrame - rf->second < 180) continue;
+                m_recoverFrame.erase(f.SN);
+            }
             auto of = m_orderFrame.find(f.SN);
             if (of != m_orderFrame.end()) {
-                if (info.GameFrame - of->second < 120) continue;   // 宽限期内 → 本帧不打扰
-                auto ot = m_orderTarget.find(f.SN);
-                if (ot != m_orderTarget.end() && ot->second > 0)
-                    m_badTarget[ot->second] = info.GameFrame;      // 目标不可达 → 拉黑换目标
-                m_orderFrame.erase(f.SN);
-                m_orderTarget.erase(f.SN);
+                auto ox = m_orderX.find(f.SN);
+                auto oy = m_orderY.find(f.SN);
+                bool moved = false;
+                if (ox != m_orderX.end() && oy != m_orderY.end())
+                    moved = (fabs(f.DR - ox->second) > 0.1 * BLOCKSIDELENGTH
+                             || fabs(f.UR - oy->second) > 0.1 * BLOCKSIDELENGTH);
+                if (moved) {                          // 指令生效 → 清掉记录，正常重新分配
+                    m_orderFrame.erase(f.SN);
+                    m_orderX.erase(f.SN);
+                    m_orderY.erase(f.SN);
+                } else if (info.GameFrame - of->second < 120) {
+                    continue;                         // 刚下令还没动 → 本帧不打扰
+                } else {
+                    auto ot = m_orderTarget.find(f.SN);
+                    if (ot != m_orderTarget.end() && ot->second > 0)
+                        m_badTarget[ot->second] = info.GameFrame;   // 不可达 → 拉黑换目标
+                    m_orderFrame.erase(f.SN);
+                    m_orderX.erase(f.SN);
+                    m_orderY.erase(f.SN);
+                    // 【脱困】下令 120 帧他一步没动 → 引擎没执行这条采集指令（多半卡在
+                    //   WORKING 状态的死目标上）。AI 接口没有"取消"指令，但 HumanMove 内部
+                    //   会 suspendRelation()+initAction()，能把卡住的行动链整条重置。
+                    //   所以先让他走回市中心，走起来后再由正常逻辑重新分配工作。
+                    if (m_centerX > 0 && m_centerY > 0) {
+                        HumanMove(f.SN, (double)m_centerX * BLOCKSIDELENGTH,
+                                        (double)m_centerY * BLOCKSIDELENGTH);
+                        m_issued.insert(f.SN);
+                        m_recoverFrame[f.SN] = info.GameFrame;
+                        continue;                 // 本帧只下移动令 → 走起来后下帧再重新派活
+                    }
+                }
             }
         }
 
@@ -532,6 +565,7 @@ void UsrAI::manageVillagers(const tagInfo& info)
                 HumanAction(f.SN, ksn);
                 m_issued.insert(f.SN);
                 m_orderTarget[f.SN] = ksn; m_orderFrame[f.SN] = info.GameFrame;
+                m_orderX[f.SN] = f.DR; m_orderY[f.SN] = f.UR;
                 woodCnt++;
                 continue;
             }
@@ -542,6 +576,7 @@ void UsrAI::manageVillagers(const tagInfo& info)
                 HumanAction(f.SN, gsn);
                 m_issued.insert(f.SN);
                 m_orderTarget[f.SN] = gsn; m_orderFrame[f.SN] = info.GameFrame;
+                m_orderX[f.SN] = f.DR; m_orderY[f.SN] = f.UR;
                 goldCnt++;
                 continue;
             }
@@ -564,6 +599,7 @@ void UsrAI::manageVillagers(const tagInfo& info)
                 HumanAction(f.SN, bestSn);
                 m_issued.insert(f.SN);
                 m_orderTarget[f.SN] = bestSn; m_orderFrame[f.SN] = info.GameFrame;
+                m_orderX[f.SN] = f.DR; m_orderY[f.SN] = f.UR;
                 m_foodGatherers.insert(f.SN);   // 标记专属食物采集
                 m_role[f.SN] = 1;                // 工种：浆果
                 berryCnt++;
@@ -579,6 +615,7 @@ void UsrAI::manageVillagers(const tagInfo& info)
                 HumanAction(f.SN, sn);
                 m_issued.insert(f.SN);
                 m_orderTarget[f.SN] = sn; m_orderFrame[f.SN] = info.GameFrame;
+                m_orderX[f.SN] = f.DR; m_orderY[f.SN] = f.UR;
                 m_role[f.SN] = 2;                // 工种：伐木（采完树后优先回来伐木）
                 woodCnt++;
                 continue;
@@ -591,6 +628,7 @@ void UsrAI::manageVillagers(const tagInfo& info)
                 HumanAction(f.SN, sn);
                 m_issued.insert(f.SN);
                 m_orderTarget[f.SN] = sn; m_orderFrame[f.SN] = info.GameFrame;
+                m_orderX[f.SN] = f.DR; m_orderY[f.SN] = f.UR;
                 stoneCnt++;
                 continue;
             }
@@ -605,6 +643,7 @@ void UsrAI::manageVillagers(const tagInfo& info)
                 HumanAction(f.SN, sn);
                 m_issued.insert(f.SN);
                 m_orderTarget[f.SN] = sn; m_orderFrame[f.SN] = info.GameFrame;
+                m_orderX[f.SN] = f.DR; m_orderY[f.SN] = f.UR;
                 m_foodGatherers.insert(f.SN);   // 打猎也标记专属
                 m_role[f.SN] = 4;                // 工种：打猎
                 foodCnt++;
@@ -639,6 +678,7 @@ void UsrAI::manageVillagers(const tagInfo& info)
                     HumanAction(f.SN, farmSN);
                     m_issued.insert(f.SN);
                     m_orderTarget[f.SN] = farmSN; m_orderFrame[f.SN] = info.GameFrame;
+                m_orderX[f.SN] = f.DR; m_orderY[f.SN] = f.UR;
                     m_foodGatherers.insert(f.SN);
                     m_role[f.SN] = 5;            // 工种：农田
                     foodCnt++;
@@ -655,6 +695,7 @@ void UsrAI::manageVillagers(const tagInfo& info)
                 HumanAction(f.SN, sn);
                 m_issued.insert(f.SN);
                 m_orderTarget[f.SN] = sn; m_orderFrame[f.SN] = info.GameFrame;
+                m_orderX[f.SN] = f.DR; m_orderY[f.SN] = f.UR;
                 m_role[f.SN] = 3;                // 工种：采金
                 goldCnt++;
                 continue;
@@ -675,6 +716,7 @@ void UsrAI::manageVillagers(const tagInfo& info)
             HumanAction(f.SN, sn);
             m_issued.insert(f.SN);
             m_orderTarget[f.SN] = sn; m_orderFrame[f.SN] = info.GameFrame;
+                m_orderX[f.SN] = f.DR; m_orderY[f.SN] = f.UR;
             m_role[f.SN] = newRole;
         }
     }
