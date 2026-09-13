@@ -483,6 +483,33 @@ void UsrAI::manageVillagers(const tagInfo& info)
             // 目标失效或卡住 → 掉下去重新分配（新指令覆盖旧目标）
         }
 
+        // 【修复·关键】重新分配前先"留在原工种"（实测：伐木的人到后面只剩一个）
+        //   原因：伐木工的树采完后落入 ①浆果（优先级最高）→ 被登记成专属食物采集者，
+        //         从此不再伐木；采金同理会被浆果吸走。这里先按原工种补位，再走原优先级链。
+        int prevRole = 0;
+        {
+            auto rit = m_role.find(f.SN);
+            if (rit != m_role.end()) prevRole = rit->second;
+        }
+        if (prevRole == 2 && woodCnt < targetWood) {          // 原来是伐木工 → 继续伐木
+            int ksn = findNearestTree(info, f.SN);
+            if (ksn >= 0) {
+                HumanAction(f.SN, ksn);
+                m_issued.insert(f.SN);
+                woodCnt++;
+                continue;
+            }
+        }
+        if (prevRole == 3 && goldCnt < targetGold) {          // 原来是采金工 → 继续采金
+            int gsn = findNearestResource(info, RESOURCE_GOLD, f.SN);
+            if (gsn >= 0) {
+                HumanAction(f.SN, gsn);
+                m_issued.insert(f.SN);
+                goldCnt++;
+                continue;
+            }
+        }
+
         // ① 浆果：开局 4 人（配置：4浆果+2砍树+1挖石+1建造），农民增多后升到 8（第一波前新增 4 人采浆果）
         //    采浆果的农民标记为专属食物采集者（浆果采完自动找下一个食物资源）
         //    【3.0.7g 修正】原固定上限 8 会把开局全部农民吸去采浆果 → 没人砍树/挖石
@@ -500,6 +527,7 @@ void UsrAI::manageVillagers(const tagInfo& info)
                 HumanAction(f.SN, bestSn);
                 m_issued.insert(f.SN);
                 m_foodGatherers.insert(f.SN);   // 标记专属食物采集
+                m_role[f.SN] = 1;                // 工种：浆果
                 berryCnt++;
                 foodCnt++;
                 continue;
@@ -512,6 +540,7 @@ void UsrAI::manageVillagers(const tagInfo& info)
             if (sn >= 0) {
                 HumanAction(f.SN, sn);
                 m_issued.insert(f.SN);
+                m_role[f.SN] = 2;                // 工种：伐木（采完树后优先回来伐木）
                 woodCnt++;
                 continue;
             }
@@ -536,6 +565,7 @@ void UsrAI::manageVillagers(const tagInfo& info)
                 HumanAction(f.SN, sn);
                 m_issued.insert(f.SN);
                 m_foodGatherers.insert(f.SN);   // 打猎也标记专属
+                m_role[f.SN] = 4;                // 工种：打猎
                 foodCnt++;
                 huntCnt++;
                 continue;
@@ -568,6 +598,7 @@ void UsrAI::manageVillagers(const tagInfo& info)
                     HumanAction(f.SN, farmSN);
                     m_issued.insert(f.SN);
                     m_foodGatherers.insert(f.SN);
+                    m_role[f.SN] = 5;            // 工种：农田
                     foodCnt++;
                     continue;
                 }
@@ -581,23 +612,26 @@ void UsrAI::manageVillagers(const tagInfo& info)
             if (sn >= 0) {
                 HumanAction(f.SN, sn);
                 m_issued.insert(f.SN);
+                m_role[f.SN] = 3;                // 工种：采金
                 goldCnt++;
                 continue;
             }
         }
         // ⑦ 兜底：依次尝试，且都受配额限制（【修复】不再无限塞人砍树）
         int sn = findNearestHunt(info, f.SN);
+        int newRole = 4;
         if (sn < 0 && goldCnt < targetGold) {
             sn = findNearestResource(info, RESOURCE_GOLD, f.SN);
-            if (sn >= 0) goldCnt++;
+            if (sn >= 0) { goldCnt++; newRole = 3; }
         }
         if (sn < 0 && woodCnt < targetWood) {
             sn = findNearestTree(info, f.SN);
-            if (sn >= 0) woodCnt++;
+            if (sn >= 0) { woodCnt++; newRole = 2; }
         }
         if (sn >= 0) {
             HumanAction(f.SN, sn);
             m_issued.insert(f.SN);
+            m_role[f.SN] = newRole;
         }
     }
 }
