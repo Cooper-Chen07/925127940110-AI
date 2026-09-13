@@ -1,4 +1,5 @@
 #include "UsrAI.h"
+#include <QString>
 #include<set>
 #include <iostream>
 #include<unordered_map>
@@ -946,7 +947,10 @@ void UsrAI::manageCenter(const tagInfo& info)
     //   · 前期：造到 20 人口（4 座房 = 20 上限）为止；靶场后补的 2 座房留给兵力，不超产农民
     //   · 铜器后且"金矿旁仓库"已建（仓库数≥2）→ 补到 24，新农民去采金
     bool bronzeNow = (info.civilizationStage >= CIVILIZATION_BRONZEAGE);
-    bool needGoldFarmers = (bronzeNow && countBuilding(info, BUILDING_STOCK) >= 2);
+    // 【3.0.7g 修复】补农民到 24 前先看有没有人口留给军队：
+    //   人口上限 - 现有农民 < 12（要留给军队的人口）→ 不扩农，避免又把自己卡成 0 兵
+    bool needGoldFarmers = (bronzeNow && countBuilding(info, BUILDING_STOCK) >= 2
+                            && (int)info.Human_MaxNum - (int)info.farmers.size() >= 12);
     int farmerTarget = 20;
     if (needGoldFarmers) farmerTarget = 24;
 
@@ -1018,8 +1022,22 @@ void UsrAI::buildBuildings(const tagInfo& info)
         // 【发育策略·建造线】住房×2（共4座=20人口）→ 箭塔1座 → 市场（随即升伐木科技）
         //   → 兵营 → 靶场（建在箭塔附近）→ 靶场建成后补2座房（共6座=28人口，给兵力腾人口）
         //   → 铜器后：金矿旁仓库 → 马厩/学院/农田
-        // 房屋目标分两阶段：靶场未建=4座；靶场建成=6座
+        // 房屋目标：靶场未建=4座(20人口)；靶场建成=6座(28人口)；铜器=8座(36人口)
+        // 【3.0.7g 关键修复·第二波没兵】config.json HOUSE_HUMAN_NUM=4 且市中心也算1座：
+        //   6 座房只有 28 人口，而"20 农民 + 祭司 + 第一波祭司转化的敌方单位"正好占满
+        //   → trainArmy 首行 Human_Num >= Human_MaxNum 判断直接 return → 第二波一个新兵都造不出来，
+        //     只能靠第一波转化的部队硬顶（实测现象）。
+        //   现在：人口接近上限就继续补房（最多 10 座 = 44 人口）。
+        //   注意只在靶场已建后才补，避免抢在"市场/兵营/靶场"这条升级关键链之前。
+        int homes = countBuilding(info, BUILDING_HOME);
         int houseTarget = (countBuilding(info, BUILDING_RANGE) > 0) ? 6 : 4;
+        bool bronzeNow2 = (info.civilizationStage >= CIVILIZATION_BRONZEAGE);
+        if (bronzeNow2 && countBuilding(info, BUILDING_RANGE) > 0) houseTarget = 8;
+        if (countBuilding(info, BUILDING_RANGE) > 0
+            && (int)info.Human_Num >= (int)info.Human_MaxNum - 2
+            && homes < 10) {
+            houseTarget = homes + 1;         // 人口卡住 → 再加一座房（给军队腾人口）
+        }
         // 记录箭塔位置（靶场要建在箭塔附近）
         int towerBX = -1, towerBY = -1;
         for (const tagBuilding& tb : info.buildings)
@@ -1473,7 +1491,19 @@ void UsrAI::trainArmy(const tagInfo& info)
             }
             break;
         case BUILDING_RANGE:
-            // 【发育策略】不造弱兵：弓箭手一律不造；铜器后 → 大弓手（复合弓兵，确保造出）
+            // 【用户要求·3.0.7g】升级铜器期间（市中心正在升级）先造 **2 个弓箭手**应急：
+            //   弓箭手 40 食 + 20 木、不需要科技、不花黄金 → 正好填上"升级期完全没兵"的空档，
+            //   第一波转化来的部队万一被打掉也不至于防线全空。
+            //   （存活数 < 2 就补，升级期间被打死了会自动补回 2 个；升完铜器立刻转大弓手）
+            if (!bronze && m_bronzeUpgradeFrame >= 0
+                && countArmy(info, AT_BOWMAN) < 2
+                && info.Meat >= BUILDING_RANGE_CREATE_BOWMAN_FOOD
+                && info.Wood >= BUILDING_RANGE_CREATE_BOWMAN_WOOD) {
+                BuildingAction(b.SN, BUILDING_RANGE_CREATE_BOWMAN);
+                m_issued.insert(b.SN);
+                break;
+            }
+            // 铜器后 → 大弓手（复合弓兵，确保造出）
             if (bronze && m_researchCount[BUILDING_RANGE_UPGRADE_COMPOSITE_BOW] > 0
                 && info.Meat >= BUILDING_RANGE_CREATE_COMPOSITE_BOWMAN_FOOD && info.Gold >= 20) {
                 BuildingAction(b.SN, BUILDING_RANGE_CREATE_COMPOSITE_BOWMAN);
@@ -2168,4 +2198,27 @@ void UsrAI::processData()
     handlePriest(info);             // 祭司：贴塔拉怪/转化（优先于探路）
     scoutWithPriest(info);          // 祭司随机探路（若祭司本帧已避险则不执行）
     scoutWithScout(info);           // 侦察骑兵探路（无战事时，持续到第三波前）
+
+    // ===== 【诊断】每 250 帧（10 秒）打一行状态到调试面板 =====
+    //   用于定位"第二波没兵"：人口是不是被农民/第一波转化兵占满、食物/黄金够不够
+    if (info.GameFrame - m_lastDebugFrame >= 250) {
+        m_lastDebugFrame = info.GameFrame;
+        int farmerCnt = 0, armyCnt = 0;
+        for (const tagFarmer& f : info.farmers)
+            if (f.FarmerSort == FARMERTYPE_FARMER) farmerCnt++;
+        for (const tagArmy& a : info.armies)
+            if (a.Sort != AT_PRIEST && a.Sort != AT_SCOUT) armyCnt++;
+        QString why = QStringLiteral("可造兵");
+        if (info.civilizationStage < CIVILIZATION_BRONZEAGE)       why = QStringLiteral("未升铜器");
+        else if (countBuilding(info, BUILDING_RANGE) == 0)         why = QStringLiteral("靶场未建");
+        else if ((int)info.Human_Num >= (int)info.Human_MaxNum)    why = QStringLiteral("人口已满(需补房)");
+        else if (info.Meat < BUILDING_RANGE_CREATE_COMPOSITE_BOWMAN_FOOD) why = QStringLiteral("食物不足");
+        else if (info.Gold < BUILDING_RANGE_CREATE_COMPOSITE_BOWMAN_GOLD) why = QStringLiteral("黄金不足");
+        DebugText(QString(QStringLiteral("AI状态: 人口%1/%2 房%3 农%4 兵%5 食%6 木%7 金%8 农田%9 时代%10 | 造兵:%11"))
+                  .arg((int)info.Human_Num).arg((int)info.Human_MaxNum)
+                  .arg(countBuilding(info, BUILDING_HOME)).arg(farmerCnt).arg(armyCnt)
+                  .arg((int)info.Meat).arg((int)info.Wood).arg((int)info.Gold)
+                  .arg(countBuilding(info, BUILDING_FARM)).arg((int)info.civilizationStage)
+                  .arg(why));
+    }
 }
