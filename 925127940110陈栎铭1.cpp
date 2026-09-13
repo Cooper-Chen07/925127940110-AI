@@ -4,6 +4,12 @@
 #include<unordered_map>
 #include<list>
 #include <cstdlib>
+// 3.0.7g 模板补齐的标准头（防编译缺失）
+#include <cmath>
+#include <climits>
+#include <algorithm>
+#include <vector>
+#include <map>
 
 using namespace std;
 tagGame tagUsrGame;
@@ -373,6 +379,11 @@ void UsrAI::manageVillagers(const tagInfo& info)
         if (info.Wood < 60) targetWood = 4;     // 严重不足加 2 人
     }
     int targetStone = 1;
+    // 【3.0.7g 调整】初始石头 300→150，只够建 1 座箭塔（150石/座）；
+    //   第二波前要 3 座塔需再挖 300 石 → 第一波后（人手充裕时）加派 1 人挖石备料
+    //   （开局不加人：保持 4浆果+2砍树+1挖石，避免挤占经济拖慢升级）
+    if (info.GameFrame > FRAME_WAVE1 && countBuilding(info, BUILDING_ARROWTOWER) < 3) targetStone = 2;
+    // 【3.0.7g 调整】金矿 200→400（翻倍）→ 黄金更充裕，挖金保持 3 人
     int targetGold = bronze ? 3 : 0;            // 铜器后挖金，为造兵准备
 
     // 3) 逐个给空闲农民分配工作
@@ -429,9 +440,11 @@ void UsrAI::manageVillagers(const tagInfo& info)
             // 目标失效或卡住 → 掉下去重新分配（新指令覆盖旧目标）
         }
 
-        // ① 浆果：开局 4 人 + 第一波前新增 4 人（共 8 人），选"采集人数最少"的丛分散采
+        // ① 浆果：开局 4 人（配置：4浆果+2砍树+1挖石+1建造），农民增多后升到 8（第一波前新增 4 人采浆果）
         //    采浆果的农民标记为专属食物采集者（浆果采完自动找下一个食物资源）
-        if (berryExists && berryCnt < 8) {
+        //    【3.0.7g 修正】原固定上限 8 会把开局全部农民吸去采浆果 → 没人砍树/挖石
+        int berryCap = ((int)info.farmers.size() <= 8) ? 4 : 8;
+        if (berryExists && berryCnt < berryCap) {
             int bestSn = -1;
             int bestCnt = 1e9;
             for (const tagResource& r : info.resources) {
@@ -1094,9 +1107,11 @@ void UsrAI::researchTech(const tagInfo& info)
             break;
         }
         case BUILDING_MARKET: {
-            // 伐木/采石 → 升级铜器后才研发（未升级前先攒 800 食物，不吃升级预算）
-            // 车轮（铜器）→ 采金（铜器后）
-            if (bronze && m_researchCount[BUILDING_MARKET_WOOD_UPGRADE] == 0
+            // 【3.0.7g 调整】采集科技在本版才真正生效（旧版整数截断=无效）：
+            //   伐木 +50%（1.5倍）、采石/采金 +60%（1.6倍）
+            //   → 伐木科技提前：市场建好即研发（木头是市场/靶场=升级瓶颈，加速建设）
+            //   → 采石/采金仍等铜器后（箭塔/黄金非升级前置，先省食物攒 800）
+            if (m_researchCount[BUILDING_MARKET_WOOD_UPGRADE] == 0
                 && info.Meat >= BUILDING_MARKET_WOOD_UPGRADE_FOOD
                 && info.Wood >= BUILDING_MARKET_WOOD_UPGRADE_WOOD) {
                 BuildingAction(b.SN, BUILDING_MARKET_WOOD_UPGRADE);
