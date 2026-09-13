@@ -1074,11 +1074,19 @@ void UsrAI::buildResourceDepots(const tagInfo& info)
         if (nearest > farPreyD) { farPreyD = nearest; farPrey = &r; }
     }
     // 【用户要求】储存点只做**距离判断**，不判断靶场（不等靶场建成，该建就建）
-    //   仓库（打猎肉）：离最近储存点（仓库/市中心）> 8 格 → 就近建一个
-    //   谷仓（浆果）  ：离最近储存点（谷仓/市中心）> 8 格 → 就近建一个
-    bool needStock = (farPrey != nullptr && farPreyD > NEED_DIST
+    //   谷仓（浆果）：离最近储存点（谷仓/市中心）> 8 格 → 就近建一个（最多 3 座）
+    //   仓库（打猎肉）：【用户要求】只建一次！铜器前不再建第二个（"猎物建造仓库只进行一次"）
+    //     下令后用"有没有真的出现仓库（含在建）"确认是否生效；
+    //     若 600 帧后仍一个仓库都没有（建造者中途死亡等）→ 允许重下一次，避免永远没有打猎仓库
+    bool needStock = (!m_preyStockDone && farPrey != nullptr && farPreyD > NEED_DIST
                       && countBuilding(info, BUILDING_STOCK) < 3
                       && info.Wood >= BUILD_STOCK_WOOD);
+    if (m_preyStockDone) {
+        bool anyStock = false;
+        for (const tagBuilding& b : info.buildings)
+            if (b.Type == BUILDING_STOCK) { anyStock = true; break; }
+        if (!anyStock && info.GameFrame - m_preyStockFrame > 600) m_preyStockDone = false;
+    }
     bool needGranary = (farBush != nullptr && farBushD > NEED_DIST
                         && countBuilding(info, BUILDING_GRANARY) < 3
                         && info.Wood >= BUILD_GRANARY_WOOD);
@@ -1119,6 +1127,8 @@ void UsrAI::buildResourceDepots(const tagInfo& info)
         if (findBuildBlockNear(info, x, y, 3, 3, gx, gy, 8)) {
             HumanBuild(m_depotBuilderSN, BUILDING_STOCK, x, y);
             m_issued.insert(m_depotBuilderSN);
+            m_preyStockDone = true;              // 【用户要求】猎物仓库只建一次
+            m_preyStockFrame = info.GameFrame;
             return;
         }
     }

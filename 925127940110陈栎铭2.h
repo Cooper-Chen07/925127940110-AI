@@ -54,6 +54,8 @@ private:
     static const int MAX_HUNTER_PER_PREY = 2;     // 每只活物最多猎人（两两一组分散猎杀）
     std::set<int> m_foodGatherers;               // 专属食物采集者（浆果/打猎）：只做食物，干完自动找下一个食物资源
     int m_depotBuilderSN = -1;                   // 资源点仓库/谷仓专职建造者（建完就地采集，不依赖随机空闲）
+    bool m_preyStockDone = false;                // 【用户要求】打猎肉的仓库只建一次（猎物仓库只进行一次）
+    int m_preyStockFrame = -1;                   // 上次下令建猎物仓库的帧（下令未生效时允许重试一次）
     std::set<int> m_issued;                      // 本帧已下令的对象 SN（防重复下令）
     int m_builderSN = -1;                        // 专职建造村民 SN（保证建筑能建起来）
     std::unordered_map<int,int> m_moveStart;     // 农民SN -> 开始移动帧（寻路卡住检测）
