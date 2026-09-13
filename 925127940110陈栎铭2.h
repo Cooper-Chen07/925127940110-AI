@@ -60,7 +60,6 @@ private:
     int  findNearestHunt(const tagInfo& info, int farmerSN);               // 打猎：随机选目标（尸体优先，防扎堆）
     int  findNearestTree(const tagInfo& info, int farmerSN);               // 砍树：分散选树（防两樵夫扎堆卡住）
     int  findNearestFarm(const tagInfo& info, int farmerSN);               // 找最近可种农田
-    bool m_huntWaiting = false;                  // 想打猎但缺搭档 → 原地等待第二个农民生成后再一起派
     int  countBuilding(const tagInfo& info, int type) const;                     // 统计已建成建筑数
     int  countArmy(const tagInfo& info, int sort) const;                         // 统计我方某兵种数量
 
