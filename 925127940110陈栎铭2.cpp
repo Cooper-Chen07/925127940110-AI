@@ -934,22 +934,66 @@ int UsrAI::findNearestTree(const tagInfo& info, int farmerSN)
         }
         return best;
     };
+    // 【用户反馈·"一个人砍树、另一个人在身后转"】
+    //   原注释写"树挨着树视为同一组"，但实现只统计了"同一棵树"的使用人数 → 两个樵夫被派到
+    //   两棵紧挨着的树；后到者的采集位（相邻格）被前者占着，寻路反复失败，就在别人身后转圈。
+    //   这里补上"邻域使用数"：相邻 1.5 格内的树算作同一个"采集位争夺区"。
+    std::unordered_map<int,int> treeAt;            // 块坐标(x*100+y) -> 树SN（快速找相邻树）
     for (const tagResource* t : trees) {
-        if (isBadTarget(t->SN, info.GameFrame)) continue;         // 卡住过的树 → 换一棵
-        int c = cnt[t->SN];
+        int bx = (int)(t->DR / BLOCKSIDELENGTH);
+        int by = (int)(t->UR / BLOCKSIDELENGTH);
+        treeAt[bx * 100 + by] = t->SN;
+    }
+    std::unordered_map<int,int> nearCnt;           // 树SN -> 邻域（不含自己）使用人数
+    for (const tagResource* t : trees) {
+        int u = 0;
+        int bx = (int)(t->DR / BLOCKSIDELENGTH);
+        int by = (int)(t->UR / BLOCKSIDELENGTH);
+        for (int dx = -2; dx <= 2; ++dx) {
+            for (int dy = -2; dy <= 2; ++dy) {
+                if (dx == 0 && dy == 0) continue;
+                auto it = treeAt.find((bx + dx) * 100 + (by + dy));
+                if (it == treeAt.end()) continue;
+                double dd = calDistance(t->DR, t->UR,
+                                        (double)(bx + dx) * BLOCKSIDELENGTH,
+                                        (double)(by + dy) * BLOCKSIDELENGTH);
+                if (dd > 1.5 * BLOCKSIDELENGTH) continue;    // 只算真正紧挨的
+                u += cnt[it->second];
+            }
+        }
+        nearCnt[t->SN] = u;
+    }
+    auto scoreOf = [&](const tagResource* t, double extra) {
         double d = calDistance(f->DR, f->UR, t->DR, t->UR);
-        // 人数权重最大（先分散防扎堆）> 离交付点距离（就近运木）> 离自己距离
-        double score = (double)c * 10.0 * BLOCKSIDELENGTH + depotDist(t) * 0.6 + d * 0.4;
-        if (c >= 2) continue;                                     // 一棵树最多 2 人
+        return extra + depotDist(t) * 0.6 + d * 0.4;
+    };
+
+    // 第一轮：整组（自己 + 紧邻树）都没人用 → 最理想，彻底不会抢采集位
+    for (const tagResource* t : trees) {
+        if (isBadTarget(t->SN, info.GameFrame)) continue;
+        if (cnt[t->SN] > 0 || nearCnt[t->SN] > 0) continue;
+        double score = scoreOf(t, 0.0);
         if (score < bestScore) { bestScore = score; bestSn = t->SN; }
     }
     if (bestSn >= 0) return bestSn;
-    // 所有树都 ≥2 人（树少人多）→ 退而求其次选最近的（总比闲着好）
-    double bestD = 1e18;
+
+    // 第二轮：自己这棵没人用（紧邻树有人）→ 次优，仍然不会和别人抢同一棵树
     for (const tagResource* t : trees) {
-        if (isBadTarget(t->SN, info.GameFrame)) continue;         // 卡住过的树不再回头选
-        double d = calDistance(f->DR, f->UR, t->DR, t->UR);
-        if (d < bestD) { bestD = d; bestSn = t->SN; }
+        if (isBadTarget(t->SN, info.GameFrame)) continue;
+        if (cnt[t->SN] > 0) continue;
+        double score = scoreOf(t, (double)nearCnt[t->SN] * 6.0 * BLOCKSIDELENGTH);
+        if (score < bestScore) { bestScore = score; bestSn = t->SN; }
+    }
+    if (bestSn >= 0) return bestSn;
+
+    // 第三轮（兜底·树少人多）：选"邻域最空 + 最近"的，并尽量避开已经有 2 人的树
+    bestScore = 1e18;
+    for (const tagResource* t : trees) {
+        if (isBadTarget(t->SN, info.GameFrame)) continue;
+        double extra = (double)nearCnt[t->SN] * 6.0 * BLOCKSIDELENGTH;
+        if (cnt[t->SN] >= 2) extra += 30.0 * BLOCKSIDELENGTH;
+        double score = scoreOf(t, extra);
+        if (score < bestScore) { bestScore = score; bestSn = t->SN; }
     }
     return bestSn;
 }
