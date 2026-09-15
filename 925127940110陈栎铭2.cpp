@@ -51,9 +51,27 @@ void UsrAI::scoutWithPriest(const tagInfo& info)
     if (priest == nullptr) return;                  // 祭司不存在（死亡=游戏失败）
     if (m_issued.count(priestSN)) return;           // 本帧已被其他模块下令（如避险撤退）
 
+    // 1.5) 【修复·反复移动】场上有敌人（第一波开打/波次残兵）时祭司不探路：
+    //      专心贴塔 + 转化，否则"探路目标"会和 handlePriest 的"回塔待命"互相打断。
+    if (!info.enemy_armies.empty() || !info.enemy_farmers.empty()) {
+        if (m_centerX >= 0) {
+            int hx, hy;
+            getPriestHome(info, hx, hy);
+            double homeDR = (double)hx * BLOCKSIDELENGTH;
+            double homeUR = (double)hy * BLOCKSIDELENGTH;
+            if (calDistance(priest->DR, priest->UR, homeDR, homeUR) > 2.0 * BLOCKSIDELENGTH
+                && priest->NowState == HUMAN_STATE_IDLE) {
+                movePriest(priestSN, priest->DR, priest->UR, homeDR, homeUR, info.GameFrame);
+            }
+        }
+        return;
+    }
+
     // 2) 探路结束 → 回祭司站位（双塔中点 > 单塔 > 市中心）
-    //    提前结束：第一波前 1500 帧（4500帧）就回塔，留时间准备防御
-    if (m_scoutIdx >= SCOUT_MAX_COUNT || info.GameFrame > FRAME_WAVE1 - 1500) {
+    //    【修复·反复移动】提前结束时机必须与 handlePriest 第 6 步"回塔下待命"完全一致
+    //    （两者都用 FRAME_WAVE1 - 2000 = 4000 帧）：原来这里是 -1500（4500），
+    //    导致 4000~4500 帧之间"一个要回塔、一个要去探路边界" → 每帧交替下令 → 原地抽搐。
+    if (m_scoutIdx >= SCOUT_MAX_COUNT || info.GameFrame > FRAME_WAVE1 - 2000) {
         if (m_centerX >= 0) {
             int hx, hy;
             getPriestHome(info, hx, hy);
@@ -1043,6 +1061,33 @@ void UsrAI::buildBuildings(const tagInfo& info)
         for (const tagBuilding& tb : info.buildings)
             if (tb.Type == BUILDING_ARROWTOWER) { towerBX = tb.BlockDR; towerBY = tb.BlockUR; break; }
 
+        // ===== 【3.0.7g 新增·第二波后发育阶段】帧 > FRAME_WAVE2 时的建设优先级 =====
+        //   为什么需要：马厩/学院原本排在 else-if 链末尾（住房→市场→兵营→靶场→马厩→学院），
+        //   而"人口临界就补房"（houseTarget = 现有房数+1）会让**住房分支永远成立**，
+        //   把马厩/学院彻底挡在后面 → 第二波之后骑兵/方阵兵永远出不来。
+        //   第二波打完（经济已成型）后把这两栋提到链首，为第三波（2 投石车 + 战车弓/复合弓）
+        //   和反攻攒兵：骑兵(速度4/150血，切投石车、救祭司) + 方阵兵(120血/17攻，正面肉盾)。
+        bool afterWave2 = (info.GameFrame > FRAME_WAVE2);
+        if (afterWave2) {
+            if (countBuilding(info, BUILDING_STABLE) == 0 && info.Wood >= BUILD_STABLE_WOOD) {
+                int sx, sy;
+                if (findBuildBlock(info, sx, sy, 3, 3)) {
+                    HumanBuild(builder, BUILDING_STABLE, sx, sy);
+                    m_issued.insert(builder);
+                    return;                     // 本帧只下这一条令（保证一帧只有一条建造指令）
+                }
+            }
+            if (countBuilding(info, BUILDING_COLLAGE) == 0
+                && info.Wood >= BUILD_COLLAGE_WOOD) {
+                int cx2, cy2;
+                if (findBuildBlock(info, cx2, cy2, 3, 3)) {
+                    HumanBuild(builder, BUILDING_COLLAGE, cx2, cy2);
+                    m_issued.insert(builder);
+                    return;
+                }
+            }
+        }
+
         // 1) 住房（先建到 4 座）
         if (countBuilding(info, BUILDING_HOME) < houseTarget && info.Wood >= BUILD_HOUSE_WOOD) {
             int x, y;
@@ -1120,7 +1165,7 @@ void UsrAI::buildBuildings(const tagInfo& info)
         // 8) 农田（升级后，谷仓旁）
         else if (info.civilizationStage >= CIVILIZATION_BRONZEAGE
             && countBuilding(info, BUILDING_MARKET) > 0
-            && countBuilding(info, BUILDING_FARM) < 3
+            && countBuilding(info, BUILDING_FARM) < (afterWave2 ? 5 : 3)
             && info.Wood >= BUILD_FARM_WOOD) {
             int gx = m_centerX, gy = m_centerY;
             for (const tagBuilding& b : info.buildings)
@@ -1905,7 +1950,11 @@ bool UsrAI::movePriest(int priestSN, double px, double py, double gx, double gy,
     adjustReachableTarget(gx, gy);
     // ① 已到目标 1 格内 → 到位即停
     if (calDistance(px, py, gx, gy) <= 1.0 * BLOCKSIDELENGTH) return false;
-    // ② 节流：60帧内且目标没大变 → 不下令
+    // ② 【修复·反复移动】最小间隔硬闸：任何情况下 15 帧内不再重新下令
+    //    原因：原来"目标差 >2 格就绕过 60 帧节流"，当两个模块（回塔待命 / 探路边界）
+    //    给出不同目标时，会每帧交替下发 HumanMove → 祭司原地来回抽搐。
+    if (frame - m_priestMoveFrame < 15) return false;
+    // ③ 节流：60帧内且目标没大变 → 不下令
     bool cool = (frame - m_priestMoveFrame < 60);
     bool targetChanged = calDistance(m_priestMoveDR, m_priestMoveUR, gx, gy) > 2.0 * BLOCKSIDELENGTH;
     if (cool && !targetChanged) return false;
