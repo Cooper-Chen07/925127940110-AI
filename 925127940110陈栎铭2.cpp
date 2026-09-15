@@ -459,6 +459,31 @@ void UsrAI::manageVillagers(const tagInfo& info)
 
         // 非空闲农民：检查工作目标是否仍然有效（存在且有剩余），并检测寻路卡住
         if (f.NowState != HUMAN_STATE_IDLE) {
+            // 【用户要求】正在采集农田的农民：这块田快采完了（剩余 ≤40）而田还不够
+            //   → **他自己去建一块新田**（不等引擎删田、也不用等专职建造者）→ 食物链不断档
+            if (f.NowState == HUMAN_STATE_WORKING
+                && m_role.count(f.SN) && m_role[f.SN] == 5) {
+                const tagBuilding* myFarm = nullptr;
+                for (const tagBuilding& fb : info.buildings)
+                    if (fb.SN == f.WorkObjectSN && fb.Type == BUILDING_FARM) { myFarm = &fb; break; }
+                if (myFarm != nullptr && myFarm->Cnt <= 40 && !mapFoodLeft(info)) {
+                    int wantR = (info.GameFrame > FRAME_WAVE2) ? ((int)info.farmers.size() / 2) : 3;
+                    if (wantR < 3) wantR = 3;
+                    if (wantR > 8) wantR = 8;
+                    if (countBuilding(info, BUILDING_FARM) < wantR
+                        && info.Wood >= BUILD_FARM_WOOD) {
+                        int gxp = m_centerX, gyp = m_centerY;
+                        for (const tagBuilding& b : info.buildings)
+                            if (b.Type == BUILDING_GRANARY) { gxp = b.BlockDR; gyp = b.BlockUR; break; }
+                        int xp, yp;
+                        if (findBuildBlock(info, xp, yp, 3, 3, gxp, gyp)) {
+                            HumanBuild(f.SN, BUILDING_FARM, xp, yp);
+                            m_issued.insert(f.SN);
+                            continue;               // 他自己去建新田
+                        }
+                    }
+                }
+            }
             bool valid = false;
             for (const tagResource& r : info.resources)
                 if (r.SN == f.WorkObjectSN && r.Cnt > 0) { valid = true; break; }
@@ -668,7 +693,11 @@ void UsrAI::manageVillagers(const tagInfo& info)
         //    专属食物采集者无条件做食物（浆果采完/猎物打完自动流转找下一个食物）；
         //    未升级时：所有空闲农民都优先采食物（尽快采完地图食物，不跑去砍树）；
         //    升级后：普通农民只在食物缺口时补位打猎（打猎也标记为专属，两两一组分散猎杀）
-        if (isFood || !bronze || foodCnt < targetFood) {
+        //    【用户要求·第二波后】猎物/浆果都采光了 → "打猎的人"没猎物可打就杵着不动。
+        //      现在第二波之后一律允许进入本分支：只要有空田（一田一人）就去种田，
+        //      不再受"食物人数只占一半(foodCnt < targetFood)"的限制。
+        const bool wave2Farm = (info.GameFrame > FRAME_WAVE2);
+        if (isFood || !bronze || foodCnt < targetFood || wave2Farm) {
             int sn = findNearestHunt(info, f.SN);
             if (sn >= 0) {
                 HumanAction(f.SN, sn);
@@ -683,7 +712,8 @@ void UsrAI::manageVillagers(const tagInfo& info)
             }
             // 【发育策略·关键】想打猎但缺搭档 → 本帧原地不动，等第二个农民生成后一起派
             //   （否则这个农民会落入下面的"砍树"兜底 → 打猎人被拉去伐木、永远凑不成一对）
-            if (m_huntWaiting) continue;
+            // 第二波后不再"等搭档"（猎物本来就少，等不到就是永远站着）→ 直接落到种田分支
+            if (m_huntWaiting && !wave2Farm) continue;
             // 【发育策略】浆果/猎物采完后即可开田（不必等铜器）：市场已建 + 浆果已采完
             //   一片农田一个农民（findNearestFarm 就近派活，农田数量上限=采粮目标数）
             bool marketBuilt = (countBuilding(info, BUILDING_MARKET) > 0);
@@ -695,6 +725,9 @@ void UsrAI::manageVillagers(const tagInfo& info)
                 double bestFarmD = 1e18;
                 for (const tagBuilding& fb : info.buildings) {
                     if (fb.Type != BUILDING_FARM || fb.Percent < 100) continue;
+                    // 【修复】农田已采空（Cnt<=0，引擎本帧就删它）→ 派过去会被当成"修理农田"
+                    //   （Core.cpp:1030-1037），农民傻站着采不到东西
+                    if (fb.Cnt <= 0) continue;
                     int users = 0;
                     for (const tagFarmer& w : info.farmers)
                         if ((w.NowState == HUMAN_STATE_WORKING || w.NowState == HUMAN_STATE_WALKING)
@@ -715,8 +748,29 @@ void UsrAI::manageVillagers(const tagInfo& info)
                     foodCnt++;
                     continue;
                 }
-                // 【用户要求】建农田也不再由采集者负责 → 交给专职建造者（见 buildBuildings 第 8) 项）
-                //   采集者只"使用"农田（上面已就近派空闲田），没有空田就去采金
+                // 【用户要求·修正】闲置的"食物系"农民（浆果/打猎/种田出身）没有猎物、也没有空田
+                //   → 让他**自己去建一块农田**：他本来就闲着，不是从伐木/采金里抽调的人，
+                //   不会影响其它工种；而唯一的专职建造者常被 马厩/学院/箭塔 占着，农田永远轮不到
+                //   → 实测"只有一片田在采、其余猎人不动"。多人可并行建田，田很快补齐。
+                if (isFood || prevRole == 1 || prevRole == 4 || prevRole == 5) {
+                    int farmWantV = (info.GameFrame > FRAME_WAVE2)
+                                    ? ((int)info.farmers.size() / 2) : 3;
+                    if (farmWantV < 3) farmWantV = 3;
+                    if (farmWantV > 8) farmWantV = 8;
+                    if (countBuilding(info, BUILDING_FARM) < farmWantV
+                        && !mapFoodLeft(info)
+                        && info.Wood >= BUILD_FARM_WOOD) {
+                        int gxf = m_centerX, gyf = m_centerY;
+                        for (const tagBuilding& b : info.buildings)
+                            if (b.Type == BUILDING_GRANARY) { gxf = b.BlockDR; gyf = b.BlockUR; break; }
+                        int xf, yf;
+                        if (findBuildBlock(info, xf, yf, 3, 3, gxf, gyf)) {
+                            HumanBuild(f.SN, BUILDING_FARM, xf, yf);
+                            m_issued.insert(f.SN);
+                            continue;
+                        }
+                    }
+                }
             }
         }
         // ⑤ 黄金：【发育策略】所有人都可以去采金（多余农民去采金，避免全堆到伐木）
@@ -742,6 +796,12 @@ void UsrAI::manageVillagers(const tagInfo& info)
         if (sn < 0 && woodCnt < targetWood) {
             sn = findNearestTree(info, f.SN);
             if (sn >= 0) { woodCnt++; newRole = 2; }
+        }
+        // 【用户要求·第二波后】所有配额都满了还没活干 → 兜底去采金（总比杵在原地强；
+        //   第二波后黄金需求大：骑兵 80 金、大弓手 20 金、方阵兵 40 金）
+        if (sn < 0 && info.GameFrame > FRAME_WAVE2) {
+            sn = findNearestResource(info, RESOURCE_GOLD, f.SN);
+            if (sn >= 0) newRole = 3;
         }
         if (sn >= 0) {
             HumanAction(f.SN, sn);
@@ -886,6 +946,18 @@ int UsrAI::countBuilding(const tagInfo& info, int type) const
     for (const tagBuilding& b : info.buildings)
         if (b.Type == type && b.Percent >= 100) cnt++;
     return cnt;
+}
+
+// 【用户要求】地图上还有浆果/动物（未被采完）→ 优先采它们，农田先不开/不扩
+//   浆果丛：RESOURCE_BUSH；猎物：羚羊/大象/狮子（都按 Cnt>0 判断）
+bool UsrAI::mapFoodLeft(const tagInfo& info) const
+{
+    for (const tagResource& r : info.resources) {
+        if (r.Cnt <= 0) continue;
+        if (r.Type == RESOURCE_BUSH || r.Type == RESOURCE_GAZELLE
+            || r.Type == RESOURCE_ELEPHANT || r.Type == RESOURCE_LION) return true;
+    }
+    return false;
 }
 
 // 统计我方某兵种数量
@@ -1100,10 +1172,41 @@ void UsrAI::buildBuildings(const tagInfo& info)
             && homes < 10) {
             houseTarget = homes + 1;         // 人口卡住 → 再加一座房（给军队腾人口）
         }
+        // 【用户要求·第二波后·一人一田】农田目标改为按"食物采集人数"（= 农民的一半）扩田：
+        //   打猎采光后要转种田的农民，必须先有田可种 → 先把农田建出来（每块 75 木）
+        //   上限 8 块（木头不够时自然停下）；第二波前仍保持 3 块
+        // 【用户要求】地图上还有浆果/动物 → 优先采它们：农田最多保留 3 块（用户原策略），
+        //   等地图食物采光后才按"食物采集人数"扩建（最多 8 块）→ 不提前浪费木头
+        int farmWant = 3;
+        if (info.GameFrame > FRAME_WAVE2 && !mapFoodLeft(info)) {
+            farmWant = (int)info.farmers.size() / 2;
+            if (farmWant < 3) farmWant = 3;
+            if (farmWant > 8) farmWant = 8;
+        }
+
         // 记录箭塔位置（靶场要建在箭塔附近）
         int towerBX = -1, towerBY = -1;
         for (const tagBuilding& tb : info.buildings)
             if (tb.Type == BUILDING_ARROWTOWER) { towerBX = tb.BlockDR; towerBY = tb.BlockUR; break; }
+
+        // ===== 【紧急·食物告急】第二波后食物见底 → 专职建造者先把农田补出来 =====
+        //   农田采空会被引擎直接删除（Core.cpp:255-269 "采集完成"）→ 必须不断补种；
+        //   而建造链里农田排在最后，第二波后 马厩/学院/箭塔/住房 会把建造者占满 → 农田轮不到。
+        if (!built && info.GameFrame > FRAME_WAVE2 && info.Meat < 150
+            && !mapFoodLeft(info)
+            && countBuilding(info, BUILDING_FARM) < farmWant
+            && countBuilding(info, BUILDING_MARKET) > 0
+            && info.Wood >= BUILD_FARM_WOOD) {
+            int gxe = m_centerX, gye = m_centerY;
+            for (const tagBuilding& b : info.buildings)
+                if (b.Type == BUILDING_GRANARY) { gxe = b.BlockDR; gye = b.BlockUR; break; }
+            int xe, ye;
+            if (findBuildBlock(info, xe, ye, 3, 3, gxe, gye)) {
+                HumanBuild(builder, BUILDING_FARM, xe, ye);
+                m_issued.insert(builder);
+                return;                     // 本帧只下这一条令
+            }
+        }
 
         // ===== 【3.0.7g 新增·第二波后发育阶段】帧 > FRAME_WAVE2 时的建设优先级 =====
         //   为什么需要：马厩/学院原本排在 else-if 链末尾（住房→市场→兵营→靶场→马厩→学院），
@@ -1126,6 +1229,38 @@ void UsrAI::buildBuildings(const tagInfo& info)
                 int cx2, cy2;
                 if (findBuildBlock(info, cx2, cy2, 3, 3)) {
                     HumanBuild(builder, BUILDING_COLLAGE, cx2, cy2);
+                    m_issued.insert(builder);
+                    return;
+                }
+            }
+        }
+
+        // ===== 【用户要求】靶场建好后立刻补第二座箭塔 =====
+        //   引擎强制前置（Development.cpp:768-769）：建塔需要"箭塔科技"，而该科技只能在谷仓研发
+        //   （50 食 + 10 秒）。石头方面：BUILD_ARROWTOWER_STONE=150 = 开局 INITIAL_STONE=150，
+        //   且我们全程不采石（targetStone=0）→ 这 150 石一直闲置，正好够第二座塔。
+        //   优先块放在住房之前 → 不被"人口临界补房"挡住（这也是马厩/学院曾经被挡死的原因）。
+        //   顺序：谷仓(120木) → 箭塔科技(50食) → 箭塔(150石)。
+        if (!built && countBuilding(info, BUILDING_RANGE) > 0
+            && countBuilding(info, BUILDING_ARROWTOWER) < 2
+            && info.Stone >= BUILD_ARROWTOWER_STONE) {
+            if (m_researchCount[BUILDING_GRANARY_ARROWTOWER] > 0) {
+                // 科技已好 → 在第一座箭塔旁边建第二座（交叉火力）
+                int tx2, ty2;
+                bool found2 = false;
+                if (towerBX >= 0) found2 = findBuildBlock(info, tx2, ty2, 2, 2, towerBX, towerBY);
+                if (!found2) found2 = findBuildBlock(info, tx2, ty2, 2, 2);
+                if (found2) {
+                    HumanBuild(builder, BUILDING_ARROWTOWER, tx2, ty2);
+                    m_issued.insert(builder);
+                    return;                     // 本帧只下这一条建造令
+                }
+            } else if (countBuilding(info, BUILDING_GRANARY) == 0
+                       && info.Wood >= BUILD_GRANARY_WOOD) {
+                // 还没有谷仓（箭塔科技没地方研发）→ 先补一座谷仓
+                int gx2, gy2;
+                if (findBuildBlock(info, gx2, gy2, 3, 3)) {
+                    HumanBuild(builder, BUILDING_GRANARY, gx2, gy2);
                     m_issued.insert(builder);
                     return;
                 }
@@ -1209,7 +1344,7 @@ void UsrAI::buildBuildings(const tagInfo& info)
         // 8) 农田（升级后，谷仓旁）
         else if (info.civilizationStage >= CIVILIZATION_BRONZEAGE
             && countBuilding(info, BUILDING_MARKET) > 0
-            && countBuilding(info, BUILDING_FARM) < (afterWave2 ? 5 : 3)
+            && countBuilding(info, BUILDING_FARM) < farmWant
             && info.Wood >= BUILD_FARM_WOOD) {
             int gx = m_centerX, gy = m_centerY;
             for (const tagBuilding& b : info.buildings)
@@ -1433,13 +1568,24 @@ void UsrAI::researchTech(const tagInfo& info)
     for (const tagBuilding& b : info.buildings) {
         if (b.Percent < 100 || b.Project != ACT_NULL) continue;   // 建造中或忙碌
         if (m_issued.count(b.SN)) continue;                        // 本帧已下令
-        if (savingForUpgrade) {
-            // 攒升级期间：所有科技暂停（【新策略】不再研发箭塔科技 → 不花 50 食物）
+        // 攒升级期间科技全停，但**谷仓例外**：建完靶场要补第二座箭塔，必须先研发箭塔科技
+        //   （该 case 内部还有"靶场已建 + 塔不足2座 + 石头够"的条件，不会乱花食物）
+        if (savingForUpgrade && b.Type != BUILDING_GRANARY) {
             continue;
         }
         switch (b.Type) {
         case BUILDING_GRANARY: {
-            // 【发育策略】开局地图自带 1 座箭塔，不造塔/不升塔 → 箭塔科技一律不研发（省 50 食物）
+            // 【用户要求·建完靶场立刻补第二座塔】必须研发箭塔科技（引擎硬前置：Development.cpp:768）
+            //   只在"真要建塔"时才花这 50 食：靶场已建 + 塔不足 2 座 + 石头够一座塔(150)
+            if (countBuilding(info, BUILDING_RANGE) > 0
+                && countBuilding(info, BUILDING_ARROWTOWER) < 2
+                && info.Stone >= BUILD_ARROWTOWER_STONE
+                && m_researchCount[BUILDING_GRANARY_ARROWTOWER] == 0
+                && info.Meat >= BUILDING_GRANARY_ARROWTOWER_FOOD) {
+                BuildingAction(b.SN, BUILDING_GRANARY_ARROWTOWER);
+                m_issued.insert(b.SN);
+                m_researchCount[BUILDING_GRANARY_ARROWTOWER]++;
+            }
             break;
         }
         case BUILDING_MARKET: {
@@ -2039,25 +2185,72 @@ void UsrAI::handlePriest(const tagInfo& info)
     bool convertingNow = false;
     for (const tagArmy& e : info.enemy_armies)
         if (e.SN == priest->WorkObjectSN) { convertingNow = true; break; }
-    // 快照延迟补偿：刚下令转化（30帧内）主线程快照可能还没把 WorkObjectSN 传回来
+    // 【修复·"转化半天没成功"】转化施法在引擎里是"随机 2~6 秒"（Core_List.cpp:610-614），
+    //   而且**任何移动指令都会 suspendRelation → 转化计时作废、下次重新随机**。
+    //   原来这里只保护"刚下令 30 帧（1.2 秒）"，1.2 秒之后第 5 步（威胁撤退）/
+    //   第 6 步（回塔待命）就会下 HumanMove，把正在进行的转化打断 → 表现为"转化半天不成功"。
+    //   现在：
+    //     · 保护窗口放大到 150 帧（= 引擎最大施法 6 秒）
+    //     · 一旦转化成功（冷却从 0 变成 >0）立刻清掉窗口 → 用户战术里的"转化后立刻跑位"不受影响
+    if (priest->ConvertCooldown > 0 && m_convertStartFrame >= 0) {
+        m_convertStartFrame = -1;      // 本次转化已成功 → 退出保护窗口
+    }
+    // 快照延迟补偿：刚下令转化（150帧内）主线程快照可能还没把 WorkObjectSN 传回来
     bool justOrderedConvert = (m_convertStartFrame >= 0
-                               && info.GameFrame - m_convertStartFrame < 30);
+                               && info.GameFrame - m_convertStartFrame < 150);
     bool inConversion = convertingNow || justOrderedConvert;
     bool lowBlood = (priest->Blood < priest->MaxBlood * 3 / 5);      // <60%
     bool criticalBlood = (priest->Blood < priest->MaxBlood / 4);     // <25% 濒死
 
+    // ================= 【第二波专属·第一波逻辑完全不动】 =================
+    //   第二波有 2 个战车弓兵（对祭司 +7 特攻 ≈7.3 DPS/个），它们会隔着塔锁定祭司；
+    //   祭司 100 血、速度 2.03（跑不过任何兵）→ 等掉血再反应往往已经来不及。
+    //   本块只做两件事，且只在第二波窗口生效：
+    //     ① "被远程兵锁定"也算作转化触发条件（不等挨打，见下面 1.6）
+    //     ② 转化时优先挑"锁定祭司的远程兵"，其中战车弓兵最优先（血 70，最容易转化成功）
+    //   注意：不新增走位分支（走位放在转化之后的 3.5 节），避免把转化挤掉。
+    //   想覆盖第三波：把下面的 FRAME_WAVE3 改成 99999。
+    const bool wave2Defense = (info.GameFrame > FRAME_WAVE2 - 3000
+                               && info.GameFrame <= FRAME_WAVE3);
+    int lockedRangedSN = -1;      // 锁定祭司的"远程兵"（含战车弓）
+    int lockedAnySN = -1;         // 锁定祭司的任意敌人
+    if (wave2Defense) {
+        for (const tagArmy& e : info.enemy_armies) {                 // 第一优先：战车弓兵
+            if (e.Blood <= 0) continue;
+            if (e.WorkObjectSN != priestSN) continue;
+            if (e.Sort == AT_CHARIOT_ARCHER) { lockedRangedSN = e.SN; break; }
+        }
+        if (lockedRangedSN < 0) {
+            for (const tagArmy& e : info.enemy_armies) {             // 其次：其它远程兵
+                if (e.Blood <= 0) continue;
+                if (e.WorkObjectSN != priestSN) continue;
+                bool ranged = (e.Sort == AT_BOWMAN || e.Sort == AT_COMPOSITE_BOWMAN
+                               || e.Sort == AT_SLINGER);
+                if (ranged) { lockedRangedSN = e.SN; break; }
+                if (lockedAnySN < 0) lockedAnySN = e.SN;             // 顺带记住近战锁定者
+            }
+        }
+    }
+
     // 1.6) 【防守策略·用户要求】受到攻击且"当前没在转化" → 立刻开始转化（自卫，不等己方火力锁定）
     //      前提：未在转化 + 冷却已好（游戏20秒）+ 未濒死（濒死优先逃命，见下面走位）
     //      目标：① 正在攻击祭司的敌人 ② 找不到(快照延迟)则射程内最近的敌人
-    if (beingHit && !inConversion && !criticalBlood
+    //      【第二波追加】被远程兵（战车弓/弓兵）锁定时也立刻转化，且优先转化它
+    //                  —— 窗口外 lockedRangedSN 恒为 -1，行为与改动前完全一致
+    if ((beingHit || lockedRangedSN >= 0) && !inConversion && !criticalBlood
         && priest->ConvertCooldown <= 0) {
+        // 节流必须 > 引擎最大施法时间（150 帧 / 6 秒），否则每到 120 帧就重下令
+        // → suspendRelation 把上一轮转化作废、重新随机 → 永远转不完
         bool tooSoon = (m_convertStartFrame >= 0
-                        && info.GameFrame - m_convertStartFrame < 120);
+                        && info.GameFrame - m_convertStartFrame < 180);
         if (!tooSoon) {
-            int attackerSN = -1;
-            for (const tagArmy& e : info.enemy_armies) {
-                if (e.Blood <= 0) continue;
-                if (e.WorkObjectSN == priestSN) { attackerSN = e.SN; break; }   // 正在打我
+            // 第二波：先挑"锁定祭司的远程兵"（血只有 35~70，最容易转化成功、威胁也最大）
+            int attackerSN = (lockedRangedSN >= 0) ? lockedRangedSN : lockedAnySN;
+            if (attackerSN < 0) {
+                for (const tagArmy& e : info.enemy_armies) {
+                    if (e.Blood <= 0) continue;
+                    if (e.WorkObjectSN == priestSN) { attackerSN = e.SN; break; }   // 正在打我
+                }
             }
             if (attackerSN < 0) {
                 // 快照延迟等原因找不到攻击者 → 用转化射程内最近的敌人
@@ -2208,8 +2401,9 @@ void UsrAI::handlePriest(const tagInfo& info)
     //        导致每帧切换目标、转化永不完成）
     bool needConvertOrder = false;
     if (target >= 0 && priest->ConvertCooldown <= 0 && nearTower) {
-        bool tooSoon = (m_convertStartFrame >= 0 && info.GameFrame - m_convertStartFrame < 120);
-        needConvertOrder = !tooSoon;   // 120帧内不再下令，转化持续完成
+        // 【修复】180 帧（7.2 秒）> 引擎最大施法 150 帧（6 秒）：保证不会在中途重下令打断转化
+        bool tooSoon = (m_convertStartFrame >= 0 && info.GameFrame - m_convertStartFrame < 180);
+        needConvertOrder = !tooSoon;   // 180 帧内不再下令，让本次转化走完
     }
 
     // 3) 有转化目标且节流通过 → 主动转化（敌人打别人时也转化，不等敌人打自己）
@@ -2219,6 +2413,38 @@ void UsrAI::handlePriest(const tagInfo& info)
         m_convertTarget = target;
         m_convertStartFrame = info.GameFrame;
         return;
+    }
+
+    // ===== 3.5) 【第二波专属·祭司拉怪跑位】把剩下的战车弓兵引进箭塔射程 =====
+    //   战术：先转化掉 1 个战车弓（上面 1.6 已做）→ 立刻背对它往箭塔方向跑
+    //   （getPriestHome = 离敌人来袭方向最远的塔）→ 战车追过来就落进箭塔射程(7格)
+    //   → 箭塔用**原有索敌逻辑**锁定它；敌人一旦被锁，反击目标就粘在塔身上，
+    //     只有塔死亡才解锁 → 它不再打祭司。
+    //   触发：第二波窗口 + 没在转化 + 未濒死 + 场上有存活敌对战车弓兵（≤14格 或 正锁定祭司）
+    //   位置：放在"主动转化"之后 → 有目标可转化时先转化，冷却期/无目标时才去拉怪。
+    {
+        const bool wave2Lure = (info.GameFrame > FRAME_WAVE2 - 3000
+                                && info.GameFrame <= FRAME_WAVE3);
+        if (wave2Lure && !inConversion && !criticalBlood) {
+            const tagArmy* ca = nullptr;
+            double caD = 1e18;
+            for (const tagArmy& e : info.enemy_armies) {
+                if (e.Blood <= 0 || e.Sort != AT_CHARIOT_ARCHER) continue;
+                double d = calDistance(priest->DR, priest->UR, e.DR, e.UR);
+                if (d < caD) { caD = d; ca = &e; }
+            }
+            if (ca != nullptr
+                && (caD <= 14.0 * BLOCKSIDELENGTH || ca->WorkObjectSN == priestSN)) {
+                int hx, hy;
+                getPriestHome(info, hx, hy);
+                if (hx >= 0) {
+                    double gx = (double)hx * BLOCKSIDELENGTH;
+                    double gy = (double)hy * BLOCKSIDELENGTH;
+                    if (movePriest(priestSN, priest->DR, priest->UR, gx, gy, info.GameFrame))
+                        return;             // 已下令撤向箭塔 → 本帧结束
+                }
+            }
+        }
     }
 
     // 4) 无可转化目标：检测威胁（非转化目标的敌人）
@@ -2234,7 +2460,8 @@ void UsrAI::handlePriest(const tagInfo& info)
     // 5) 有其他威胁（非转化目标）→ 贴塔走位
     //    目标 = getPriestHome（敌人反侧最远的塔，固定值）——与"被攻击走位/回塔下"目标统一，
     //    防止"最近塔"与"敌人反侧塔"两个不同目标交替触发 → 祭司两点来回横跳
-    if (threat != nullptr && nearest < threatDist) {
+    // 【修复】转化进行中不许走位打断（HumanMove 会 suspendRelation → 转化作废重来）
+    if (!inConversion && threat != nullptr && nearest < threatDist) {
         int hx, hy;
         getPriestHome(info, hx, hy);
         if (hx >= 0) {
@@ -2244,7 +2471,8 @@ void UsrAI::handlePriest(const tagInfo& info)
     }
 
     // 6) 无威胁且无转化目标：不在塔下 → 回塔下待命（节流下令）
-    if (!nearTower && info.GameFrame > FRAME_WAVE1 - 2000) {
+    // 【修复】同上：转化进行中不回塔待命，先把这次转化走完
+    if (!inConversion && !nearTower && info.GameFrame > FRAME_WAVE1 - 2000) {
         int hx, hy;
         getPriestHome(info, hx, hy);
         if (hx >= 0) {

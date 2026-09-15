@@ -82,6 +82,7 @@ private:
         return (it != m_badTarget.end()) && (frame - it->second < 600);
     }
     int  countBuilding(const tagInfo& info, int type) const;                     // 统计已建成建筑数
+    bool mapFoodLeft(const tagInfo& info) const;                                // 地图上还有浆果/猎物？（决定要不要开农田）
     int  countArmy(const tagInfo& info, int sort) const;                         // 统计我方某兵种数量
 
     // ===== 生产与科技 =====
