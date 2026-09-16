@@ -446,6 +446,17 @@ void UsrAI::manageVillagers(const tagInfo& info)
         }
     }
 
+    // ===== 【用户要求·铜器后人员配额】=====
+    //   采金 5 人（固定）；木材 4 人，木材不够(<150)时临时加到 6 人；
+    //   其余**全部采集食物**——食物是造兵/科技的唯一瓶颈（实测食物只有 10~28 时
+    //   180 食的复合弓科技和造兵全卡住，而黄金却堆到 260）。
+    if (bronze) {
+        targetGold = 5;
+        targetWood = (info.Wood < 150) ? 6 : 4;    // 木材 4 人；不够时临时加到 6
+        targetFood = total - targetGold - targetWood;   // 其余全采食物
+        if (targetFood < 5) targetFood = 5;
+    }
+
     // 3) 逐个给空闲农民分配工作
     //    额外处理：非空闲但"工作目标失效"的农民（如猎取的羚羊尸体已被采完）
     //    也重新分配，避免卡在无效目标上不动
@@ -466,7 +477,8 @@ void UsrAI::manageVillagers(const tagInfo& info)
                 const tagBuilding* myFarm = nullptr;
                 for (const tagBuilding& fb : info.buildings)
                     if (fb.SN == f.WorkObjectSN && fb.Type == BUILDING_FARM) { myFarm = &fb; break; }
-                if (myFarm != nullptr && myFarm->Cnt <= 40 && !mapFoodLeft(info)) {
+                if (myFarm != nullptr && myFarm->Cnt <= 40
+                    && (!mapFoodLeft(info) || info.Meat < 200)) {
                     int wantR = (info.GameFrame > FRAME_WAVE2) ? ((int)info.farmers.size() / 2) : 3;
                     if (wantR < 3) wantR = 3;
                     if (wantR > 8) wantR = 8;
@@ -758,7 +770,7 @@ void UsrAI::manageVillagers(const tagInfo& info)
                     if (farmWantV < 3) farmWantV = 3;
                     if (farmWantV > 8) farmWantV = 8;
                     if (countBuilding(info, BUILDING_FARM) < farmWantV
-                        && !mapFoodLeft(info)
+                        && (!mapFoodLeft(info) || info.Meat < 200)
                         && info.Wood >= BUILD_FARM_WOOD) {
                         int gxf = m_centerX, gyf = m_centerY;
                         for (const tagBuilding& b : info.buildings)
@@ -797,11 +809,15 @@ void UsrAI::manageVillagers(const tagInfo& info)
             sn = findNearestTree(info, f.SN);
             if (sn >= 0) { woodCnt++; newRole = 2; }
         }
-        // 【用户要求·第二波后】所有配额都满了还没活干 → 兜底去采金（总比杵在原地强；
-        //   第二波后黄金需求大：骑兵 80 金、大弓手 20 金、方阵兵 40 金）
-        if (sn < 0 && info.GameFrame > FRAME_WAVE2) {
+        // 【用户要求·铜器后】兜底不再乱塞采金（黄金固定 5 人）：
+        //   木材不够(<150)时临时加人伐木（最多到 6 个）；实在没活且黄金不足 5 人才去补位
+        if (sn < 0 && bronze && info.Wood < 150 && woodCnt < 6) {
+            sn = findNearestTree(info, f.SN);
+            if (sn >= 0) { woodCnt++; newRole = 2; }
+        }
+        if (sn < 0 && bronze && goldCnt < targetGold) {
             sn = findNearestResource(info, RESOURCE_GOLD, f.SN);
-            if (sn >= 0) newRole = 3;
+            if (sn >= 0) { goldCnt++; newRole = 3; }
         }
         if (sn >= 0) {
             HumanAction(f.SN, sn);
@@ -952,10 +968,15 @@ int UsrAI::countBuilding(const tagInfo& info, int type) const
 //   浆果丛：RESOURCE_BUSH；猎物：羚羊/大象/狮子（都按 Cnt>0 判断）
 bool UsrAI::mapFoodLeft(const tagInfo& info) const
 {
+    // 【修复】只承认"离基地 40 格内"的浆果/猎物：地图另一头的一只动物，不该让我们一直不开农田
+    double cx = (double)m_centerX * BLOCKSIDELENGTH;
+    double cy = (double)m_centerY * BLOCKSIDELENGTH;
     for (const tagResource& r : info.resources) {
         if (r.Cnt <= 0) continue;
-        if (r.Type == RESOURCE_BUSH || r.Type == RESOURCE_GAZELLE
-            || r.Type == RESOURCE_ELEPHANT || r.Type == RESOURCE_LION) return true;
+        if (r.Type != RESOURCE_BUSH && r.Type != RESOURCE_GAZELLE
+            && r.Type != RESOURCE_ELEPHANT && r.Type != RESOURCE_LION) continue;
+        if (calDistance(cx, cy, r.DR, r.UR) > 40.0 * BLOCKSIDELENGTH) continue;   // 太远 → 视为没有
+        return true;
     }
     return false;
 }
@@ -1178,7 +1199,8 @@ void UsrAI::buildBuildings(const tagInfo& info)
         // 【用户要求】地图上还有浆果/动物 → 优先采它们：农田最多保留 3 块（用户原策略），
         //   等地图食物采光后才按"食物采集人数"扩建（最多 8 块）→ 不提前浪费木头
         int farmWant = 3;
-        if (info.GameFrame > FRAME_WAVE2 && !mapFoodLeft(info)) {
+        // 【修复】食物告急（<200）时不被"地图还有食物"挡住：远水不解近渴，先把田开出来
+        if (info.GameFrame > FRAME_WAVE2 && (!mapFoodLeft(info) || info.Meat < 200)) {
             farmWant = (int)info.farmers.size() / 2;
             if (farmWant < 3) farmWant = 3;
             if (farmWant > 8) farmWant = 8;
@@ -1193,7 +1215,6 @@ void UsrAI::buildBuildings(const tagInfo& info)
         //   农田采空会被引擎直接删除（Core.cpp:255-269 "采集完成"）→ 必须不断补种；
         //   而建造链里农田排在最后，第二波后 马厩/学院/箭塔/住房 会把建造者占满 → 农田轮不到。
         if (!built && info.GameFrame > FRAME_WAVE2 && info.Meat < 150
-            && !mapFoodLeft(info)
             && countBuilding(info, BUILDING_FARM) < farmWant
             && countBuilding(info, BUILDING_MARKET) > 0
             && info.Wood >= BUILD_FARM_WOOD) {
@@ -1205,6 +1226,21 @@ void UsrAI::buildBuildings(const tagInfo& info)
                 HumanBuild(builder, BUILDING_FARM, xe, ye);
                 m_issued.insert(builder);
                 return;                     // 本帧只下这一条令
+            }
+        }
+
+        // ===== 【紧急·人口满】人口卡住 → 住房抢先 =====
+        //   实测：房5、人口22/24、调试行一直显示"造兵:人口已满(需补房)"，但唯一建造者被
+        //   农田告急/马厩/学院/箭塔 依次占着 → 住房排在最后永远轮不到 → 兵和农民都造不出来。
+        //   住房只要 30 木却能立刻解锁人口，所以放在"食物紧急"之后、其它建设之前。
+        if (!built && countBuilding(info, BUILDING_HOME) < houseTarget
+            && (int)info.Human_Num >= (int)info.Human_MaxNum - 2
+            && info.Wood >= BUILD_HOUSE_WOOD) {
+            int xh, yh;
+            if (findBuildBlock(info, xh, yh, 2, 2)) {
+                HumanBuild(builder, BUILDING_HOME, xh, yh);
+                m_issued.insert(builder);
+                return;
             }
         }
 
