@@ -13,6 +13,15 @@
 #include <map>
 
 using namespace std;
+
+// ============================================================
+// 【提交排查·实验C】AI 诊断输出开关
+//   DebugText → 引擎的 call_debugText/Logger 是**在 AI 线程里**调用的；评测机崩溃日志显示：
+//   主线程当时正在 Logger::messageOutput 写日志，AI 线程同时崩在 UsrAI::processData
+//   → 怀疑日志系统非线程安全（本地 MinGW 32 位/时序不同，才没暴露）。
+//   1 = 打开诊断行（本地看状态用）；0 = 关闭（提交用）
+// ============================================================
+#define USRAI_DEBUG_LINE 0
 tagGame tagUsrGame;
 ins UsrIns;
 /*##########DO NOT MODIFY THE CODE ABOVE##########*/
@@ -2558,6 +2567,7 @@ void UsrAI::processData()
     scoutWithPriest(info);          // 祭司随机探路（若祭司本帧已避险则不执行）
     scoutWithScout(info);           // 侦察骑兵探路（无战事时，持续到第三波前）
 
+#if USRAI_DEBUG_LINE
     // ===== 【诊断】每 250 帧（10 秒）打一行状态到调试面板 =====
     //   用于定位"第二波没兵"：人口是不是被农民/第一波转化兵占满、食物/黄金够不够
     if (info.GameFrame - m_lastDebugFrame >= 250) {
@@ -2580,4 +2590,5 @@ void UsrAI::processData()
                   .arg(countBuilding(info, BUILDING_FARM)).arg((int)info.civilizationStage)
                   .arg(why));
     }
+#endif   // USRAI_DEBUG_LINE
 }
