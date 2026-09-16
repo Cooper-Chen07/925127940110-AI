@@ -975,7 +975,9 @@ bool UsrAI::mapFoodLeft(const tagInfo& info) const
         if (r.Cnt <= 0) continue;
         if (r.Type != RESOURCE_BUSH && r.Type != RESOURCE_GAZELLE
             && r.Type != RESOURCE_ELEPHANT && r.Type != RESOURCE_LION) continue;
-        if (calDistance(cx, cy, r.DR, r.UR) > 40.0 * BLOCKSIDELENGTH) continue;   // 太远 → 视为没有
+        // 【编译修复】本函数是 const，而基类的 calDistance 不是 const 成员 → 这里自己算平方距离
+        double dx = r.DR - cx, dy = r.UR - cy;
+        if (dx * dx + dy * dy > (40.0 * BLOCKSIDELENGTH) * (40.0 * BLOCKSIDELENGTH)) continue;   // 太远 → 视为没有
         return true;
     }
     return false;
