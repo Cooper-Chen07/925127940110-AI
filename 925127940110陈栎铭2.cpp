@@ -26,6 +26,56 @@ tagGame tagUsrGame;
 ins UsrIns;
 /*##########DO NOT MODIFY THE CODE ABOVE##########*/
 
+// ============================================================
+// 【3.0.7g·改造A】所有跨帧状态放在**文件作用域**（类里不再有任何数据成员）
+//   原因见 UsrAI.h 顶部注释：评测机若把本文件链接到预编译好的引擎，
+//   类里加成员会让 new UsrAI() 的 sizeof 与引擎预期不符 → 对象越界写坏堆 → 开局崩溃。
+//   这里用与原来**同名**的变量，所以下面所有函数体一行都不用改。
+// ============================================================
+static int m_scoutIdx = 0;                              // 已完成探路次数（跨帧保存）
+static int m_scoutStartFrame = -1;                      // 探路下令帧（卡住超时判断用）
+static int m_centerX = -1, m_centerY = -1;              // 市镇中心块坐标（回家/找地参照）
+static int m_map[100][100] = {};                        // 地图标记：0=空地 >0=占用 <0=不可走
+static std::vector<Point> m_explored;                   // 已探明的空地集合
+static int m_searchX = 0, m_searchY = 0;                // 找建筑空地的搜索起点
+static const int MAX_HUNTER_PER_PREY = 2;               // 每只活物最多猎人
+static std::set<int> m_foodGatherers;                   // 专属食物采集者
+static std::unordered_map<int,int> m_role;              // 农民SN -> 工种
+static int m_depotBuilderSN = -1;                       // 资源点仓库/谷仓专职建造者
+static bool m_preyStockDone = false;                    // 猎物仓库只建一次
+static int m_preyStockFrame = -1;                       // 上次下令建猎物仓库的帧
+static int m_lastDebugFrame = -9999;                    // 上次打诊断信息的帧
+static int m_bronzeUpgradeFrame = -1;                   // 铜器升级下令帧
+static std::set<int> m_issued;                          // 本帧已下令的对象 SN
+static int m_builderSN = -1;                            // 专职建造村民 SN
+static std::unordered_map<int,int> m_moveStart;         // 农民SN -> 开始移动帧
+static std::unordered_map<int,double> m_lastDist;       // 农民SN -> 上帧到目标距离
+static std::unordered_map<int,int> m_stuckFrame;        // 农民SN -> 上次判卡住帧
+static std::unordered_map<int,int> m_orderFrame;        // 农民SN -> 上次下采集令帧
+static std::unordered_map<int,int> m_orderTarget;       // 农民SN -> 上次下令目标SN
+static std::unordered_map<int,int> m_recoverFrame;      // 农民SN -> 强制回家帧
+static std::unordered_map<int,double> m_orderX;         // 农民SN -> 下令时位置X
+static std::unordered_map<int,double> m_orderY;         // 农民SN -> 下令时位置Y
+static bool m_huntWaiting = false;                      // 想打猎但缺搭档
+static std::unordered_map<int,int> m_badTarget;         // 资源SN -> 判定不可达帧
+static std::unordered_map<int,int> m_researchCount;     // 科技 Action -> 已发起次数
+static int m_convertTarget = -1;                        // 上次转化目标 SN
+static int m_convertStartFrame = -1;                    // 上次转化下令帧
+static int m_priestLastBlood = -1;                      // 祭司上一帧血量
+static int m_priestMoveFrame = -9999;                   // 上次祭司移动下令帧
+static double m_priestMoveDR = 0, m_priestMoveUR = 0;   // 上次祭司移动目标
+static std::unordered_map<int,int> m_towerSwitch;       // 箭塔SN -> 上次下令帧
+static std::unordered_map<int,int> m_armySwitch;        // 军队SN -> 上次转火帧
+static int m_enemyDirX = 0, m_enemyDirY = 0;            // 敌人来袭方向（±1）
+static bool m_builderGathering = false;                 // 建造者"没活干、临时采集"中
+
+// isBadTarget 原来是头文件里的内联函数（用到 m_badTarget），随状态一起挪到文件作用域
+bool UsrAI::isBadTarget(int sn, int frame) const
+{
+    auto it = m_badTarget.find(sn);
+    return (it != m_badTarget.end()) && (frame - it->second < 600);
+}
+
 // 祭司探路参数
 #define SCOUT_MAX_COUNT 20       // 探路次数上限（探完即回塔，探得更多发育更快）
 #define FRAME_WAVE1     6000     // 第一波进攻帧数（约4分钟）
