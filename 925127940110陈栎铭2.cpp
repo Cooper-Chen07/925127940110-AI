@@ -608,18 +608,30 @@ void UsrAI::manageVillagers(const tagInfo& info)
                                && !isAnimal && tDist > 3.0 * BLOCKSIDELENGTH) {
                         timeout = 150;             // 说在干活却离资源很远
                     }
-                    if (timeout > 0) {
+                    // 【修复·1b】身上背着货(Resource>0) → 他要么正在采集、要么正在回城卸货，
+                    //   此时"到资源点的距离"本来就可能变大（回程必然变大）→ 一律不判卡、不拉黑。
+                    //   ★ 这里只是不让 suspect 置位（等价于"这农民没事、别碰他"，与 timeout==0 时
+                    //     既有的 continue 完全同类），**结构上不可能触碰后面的重新分配路径**。
+                    //     对比 patch36 的教训：那次是在重新分配路径入口加 continue 跳过整条
+                    //     优先级链 → 农民永久冻结（实测"采集资源的人都卡住了"）。
+                    if (timeout > 0 && f.Resource <= 0) {
                         suspect = true;
                         auto it = m_moveStart.find(f.SN);
                         auto id = m_lastDist.find(f.SN);
                         if (it == m_moveStart.end() || id == m_lastDist.end()) {
                             m_moveStart[f.SN] = info.GameFrame;
                             m_lastDist[f.SN] = tDist;
-                        } else if (tDist < id->second - 0.2 * BLOCKSIDELENGTH) {
-                            m_moveStart[f.SN] = info.GameFrame;   // 在靠近 → 有进展，重置计时
+                        } else if (tDist < id->second - 1.0 * BLOCKSIDELENGTH) {
+                            // 【修复·1a】"有进展"按**整段窗口**判断，绝不能逐帧比：
+                            //   农民速度 HUMAN_SPEED = 2.236 像素/帧 = 0.0625 格/帧，
+                            //   原来"比上一帧靠近 0.2 格(7.16 像素)"才算进展 → 永远不成立
+                            //   → 任何 3 格以外的目标满 timeout 帧必判"卡住" → 农民半路折返。
+                            //   现在：整段窗口净靠近 1 格以上才算有进展（约 16 帧一次）。
+                            m_moveStart[f.SN] = info.GameFrame;   // 有进展 → 重置窗口
                             m_lastDist[f.SN] = tDist;
                         } else {
-                            m_lastDist[f.SN] = tDist;
+                            // 【关键】不再每帧刷新 m_lastDist！否则"窗口起点"被抹掉，
+                            //   计时永远从第一帧起算 → 计时器形同虚设。
                             if (info.GameFrame - it->second > timeout) stuck = true;
                         }
                     }
