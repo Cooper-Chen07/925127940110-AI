@@ -60,6 +60,9 @@ static bool m_huntWaiting = false;                      // 想打猎但缺搭档
 static std::unordered_map<int,int> m_badTarget;         // 资源SN -> 判定不可达帧
 static std::unordered_map<int,int> m_researchCount;     // 科技 Action -> 已发起次数
 static int m_convertTarget = -1;                        // 上次转化目标 SN
+static int m_lastConvertedSN = -1;                      // 刚转化成功的那个敌人 SN
+                                                        // （已变友军，但敌人快照可能残留 1~2 帧；
+                                                        //   拉怪找"第二个战车弓兵"时必须排除它）
 static int m_convertStartFrame = -1;                    // 上次转化下令帧
 static int m_priestLastBlood = -1;                      // 祭司上一帧血量
 static int m_priestMoveFrame = -9999;                   // 上次祭司移动下令帧
@@ -113,16 +116,15 @@ void UsrAI::scoutWithPriest(const tagInfo& info)
     // 1.5) 【修复·反复移动】场上有敌人（第一波开打/波次残兵）时祭司不探路：
     //      专心贴塔 + 转化，否则"探路目标"会和 handlePriest 的"回塔待命"互相打断。
     if (!info.enemy_armies.empty() || !info.enemy_farmers.empty()) {
-        if (m_centerX >= 0) {
-            int hx, hy;
-            getPriestHome(info, hx, hy);
-            double homeDR = (double)hx * BLOCKSIDELENGTH;
-            double homeUR = (double)hy * BLOCKSIDELENGTH;
-            if (calDistance(priest->DR, priest->UR, homeDR, homeUR) > 2.0 * BLOCKSIDELENGTH
-                && priest->NowState == HUMAN_STATE_IDLE) {
-                movePriest(priestSN, priest->DR, priest->UR, homeDR, homeUR, info.GameFrame);
-            }
-        }
+        // 【修复·第一次转化失败 + 来回徘徊】有敌人时**本函数不再碰祭司**：
+        //   原来这里会把他拽回"塔中心"（getPriestHome），而 handlePriest 第 3.5/5 步
+        //   要他站在"塔背面"（偏移 1.5 格）——两者在 2.0 格阈值附近来回打架：
+        //     · 祭司在塔背面 ≈1.5 格 + movePriest 的 1 格到达容差 → 可能 > 2.0 格
+        //     · 于是本函数把他拽回塔心 → handlePriest 再推回塔背面 → **来回徘徊**
+        //   更致命：施法期间快照若仍显示 IDLE（延迟 1~2 帧），这里发的 HumanMove 会
+        //   suspendRelation → **把正在进行的转化整个取消**（实测"第一次转化失败"）。
+        //   祭司站位已由 handlePriest 第 5 步（威胁<10格→撤到塔背面）与
+        //   第 6 步（离塔>6格→回塔下待命）完整负责，这里不需要也不应该再插手。
         return;
     }
 
@@ -522,6 +524,11 @@ void UsrAI::manageVillagers(const tagInfo& info)
     for (const tagFarmer& f : info.farmers) {
         if (f.FarmerSort != FARMERTYPE_FARMER) continue;
         if (f.SN == m_builderSN) continue;              // 专职建造者不参与采集（由 buildBuildings 调度）
+        // 【修复·谷仓没人建】资源点仓库/谷仓的专职建造者（m_depotBuilderSN）同样不能被抢走：
+        //   这里原来只排除了 m_builderSN。于是 buildResourceDepots 刚下完建造令，下一帧本函数
+        //   就把他改派去采集 → HumanAction 会取消正在进行的 CoreEven_FixBuilding（建造），
+        //   地基建了一半再没人管，而 AI 还会在旁边再下一个 → 同一处浆果两个地基都没人建。
+        if (f.SN == m_depotBuilderSN) continue;
         if (m_issued.count(f.SN)) continue;
         bool isFood = (m_foodGatherers.count(f.SN) > 0) && !bronze;
         //  专属食物采集者（浆果/打猎）：只做食物（浆果→打猎→种田）
@@ -1498,6 +1505,25 @@ void UsrAI::buildBuildings(const tagInfo& info)
 }
 
 // ============================================================
+// 【修复·谷仓重复建】统计某类建筑数量（**含在建的地基**）
+//   原来的 countBuilding() 只数 Percent>=100（已建成），于是 buildResourceDepots 里
+//   "刚下过令的谷仓"既不算"最近储存点"、也不计入数量上限：
+//     · 距离判定 → 那堆浆果永远显得离储存点 > 8 格
+//     · 数量上限 → < 3 永远成立
+//   结果：只要建造者中途被打断一次（被打死 / 被 manageVillagers 抢去采集 /
+//         找不到空地而被释放），下一帧就会在同一堆浆果旁**再下一个地基**，
+//         而木头是下单即刻全额扣除的（Core_List.cpp:391）→ 白吃 120 木/座。
+//   本函数是文件作用域的 static 自由函数 —— **不进类**，保证 sizeof(UsrAI) 不变。
+// ============================================================
+static int countBuildingAny(const tagInfo& info, int type)
+{
+    int cnt = 0;
+    for (const tagBuilding& b : info.buildings)
+        if (b.Type == type) cnt++;
+    return cnt;
+}
+
+// ============================================================
 // 资源点仓库/谷仓：固定 1 个"资源点建造者"负责（m_depotBuilderSN）
 //   · 不再依赖"随机空闲农民"（经济满员时没人空闲 → 远处仓库永远建不出来）
 //   · 建完仓库/谷仓后 → 就地采集最近的浆果/猎物（正好投入采集，食物就近存放）
@@ -1519,7 +1545,10 @@ void UsrAI::buildResourceDepots(const tagInfo& info)
         if (r.Type != RESOURCE_BUSH || r.Cnt <= 0) continue;
         double nearest = 1e18;
         for (const tagBuilding& b : info.buildings) {
-            if (b.Percent < 100) continue;
+            // 【修复·谷仓重复建】在建的谷仓/市中心也算"储存点"：
+            //   原来这里有 if (b.Percent < 100) continue; 把地基排除掉了 →
+            //   刚下过令的谷仓不算数 → 同一堆浆果的距离判定恒 > 8 格 → 反复下地基。
+            //   （地基马上就要变成储存点，提前算上是正确的）
             if (b.Type != BUILDING_GRANARY && b.Type != BUILDING_CENTER) continue;
             double d = calDistance(r.DR, r.UR,
                                    (double)b.BlockDR * BLOCKSIDELENGTH,
@@ -1536,7 +1565,7 @@ void UsrAI::buildResourceDepots(const tagInfo& info)
         if (r.Cnt <= 0) continue;
         double nearest = 1e18;
         for (const tagBuilding& b : info.buildings) {
-            if (b.Percent < 100) continue;
+            // 【修复·仓库重复建】在建的仓库/市中心也算"储存点"（同浆果堆那条）
             if (b.Type != BUILDING_STOCK && b.Type != BUILDING_CENTER) continue;
             double d = calDistance(r.DR, r.UR,
                                    (double)b.BlockDR * BLOCKSIDELENGTH,
@@ -1551,7 +1580,7 @@ void UsrAI::buildResourceDepots(const tagInfo& info)
     //     下令后用"有没有真的出现仓库（含在建）"确认是否生效；
     //     若 600 帧后仍一个仓库都没有（建造者中途死亡等）→ 允许重下一次，避免永远没有打猎仓库
     bool needStock = (!m_preyStockDone && farPrey != nullptr && farPreyD > NEED_DIST
-                      && countBuilding(info, BUILDING_STOCK) < 3
+                      && countBuildingAny(info, BUILDING_STOCK) < 3
                       && info.Wood >= BUILD_STOCK_WOOD);
     if (m_preyStockDone) {
         bool anyStock = false;
@@ -1560,7 +1589,7 @@ void UsrAI::buildResourceDepots(const tagInfo& info)
         if (!anyStock && info.GameFrame - m_preyStockFrame > 600) m_preyStockDone = false;
     }
     bool needGranary = (farBush != nullptr && farBushD > NEED_DIST
-                        && countBuilding(info, BUILDING_GRANARY) < 3
+                        && countBuildingAny(info, BUILDING_GRANARY) < 3
                         && info.Wood >= BUILD_GRANARY_WOOD);
     // 没有任何要建的 + 没在役建造者 → 直接结束
     if (!needStock && !needGranary && m_depotBuilderSN < 0) return;
@@ -1948,6 +1977,28 @@ void UsrAI::getPriestHome(const tagInfo& info, int& hx, int& hy) const
 }
 
 // ============================================================
+// 【修复·祭司拉怪】算"撤退终点"：塔坐标 + **背对追兵偏移 1.5 格**
+//   为什么必须偏移：祭司停在**塔中心**时，射程 7 的战车弓兵会停在离祭司 7 格处
+//   = 离塔 7~8 格，而箭塔索敌是 defense() 里 if (dt > range) continue（range=7）
+//   → 正好锁不到它，拉怪白拉。
+//   站到"塔背对追兵"的一侧后，追兵要打到祭司就必须绕到那一侧，
+//   距塔变成 7-1.5 ≈ 5.5 格 < 7 → 箭塔锁得到 → 仇恨从祭司转到塔上。
+//   参数：(ex,ey)=追兵（第二个战车弓兵/最近威胁）位置；(hx,hy)=选中的塔块坐标
+//   文件作用域 static 自由函数 —— **不进类**，保证 sizeof(UsrAI) 不变。
+// ============================================================
+static void priestRetreatPoint(double ex, double ey, int hx, int hy, double& gx, double& gy)
+{
+    gx = (double)hx * BLOCKSIDELENGTH;
+    gy = (double)hy * BLOCKSIDELENGTH;
+    double vx = gx - ex, vy = gy - ey;              // 从追兵指向塔
+    double len = sqrt(vx * vx + vy * vy);
+    if (len < 1e-6) { vx = 0.0; vy = 1.0; len = 1.0; }
+    const double OFFSET = 1.5 * BLOCKSIDELENGTH;    // 再沿同方向外移 1.5 格 = 塔背面
+    gx += vx / len * OFFSET;
+    gy += vy / len * OFFSET;
+}
+
+// ============================================================
 // 防守：箭塔"拉仇恨"——优先攻击满血（未标记）的敌人
 // 规则：
 //   ① 射程内优先选"满血"敌人（标记它/拉到仇恨，广覆盖每个进射程的敌人）
@@ -2291,6 +2342,9 @@ void UsrAI::handlePriest(const tagInfo& info)
     //     · 一旦转化成功（冷却从 0 变成 >0）立刻清掉窗口 → 用户战术里的"转化后立刻跑位"不受影响
     if (priest->ConvertCooldown > 0 && m_convertStartFrame >= 0) {
         m_convertStartFrame = -1;      // 本次转化已成功 → 退出保护窗口
+        m_lastConvertedSN = m_convertTarget;   // 【修复·拉怪】记住"刚转化的那个"：
+        //   它已经变成我方单位，但敌人快照可能还残留 1~2 帧。拉怪找"第二个战车弓兵"
+        //   时必须排除它，否则会把它当敌人 → 撤退方向算成"远离它" → 正好迎着第二个跑。
     }
     // 快照延迟补偿：刚下令转化（150帧内）主线程快照可能还没把 WorkObjectSN 传回来
     bool justOrderedConvert = (m_convertStartFrame >= 0
@@ -2484,6 +2538,34 @@ void UsrAI::handlePriest(const tagInfo& info)
         // ③ attackedByUs 为空 → target 保持 -1：本帧不转化（等兵先接战建立仇恨）
     }
 
+    // ===== 【修复·D】拉怪优先于"主动转化" =====
+    //   第二波窗口内，只要还有**第二个**战车弓兵活着，就先跑位把它引进塔射程，
+    //   不要跑出去转化别的兵（实测"主动出击转化方阵兵"→ 出塔被近战围殴 → 死在回塔路上）。
+    //   ★ 找"第二个"时必须双重排除：
+    //     · m_convertTarget    = 正在下令转化的那个
+    //     · m_lastConvertedSN  = 刚转化成功的那个（已变友军，快照可能残留）
+    //   不排除就会把它当敌人 → 撤退方向算反 → 正好迎着第二个跑。
+    bool needLure = false;
+    const tagArmy* lureCA = nullptr;
+    {
+        const bool wave2LureWindow = (info.GameFrame > FRAME_WAVE2 - 3000
+                                      && info.GameFrame <= FRAME_WAVE3);
+        if (wave2LureWindow) {
+            double lureD = 1e18;
+            for (const tagArmy& e : info.enemy_armies) {
+                if (e.Blood <= 0 || e.Sort != AT_CHARIOT_ARCHER) continue;
+                if (e.SN == m_convertTarget) continue;      // 正在转化/刚下令的那个
+                if (e.SN == m_lastConvertedSN) continue;    // 已经转化成功的那个（已是友军）
+                double d = calDistance(priest->DR, priest->UR, e.DR, e.UR);
+                if (d < lureD) { lureD = d; lureCA = &e; }
+            }
+            if (lureCA != nullptr
+                && (lureD <= 14.0 * BLOCKSIDELENGTH || lureCA->WorkObjectSN == priestSN)) {
+                needLure = true;
+            }
+        }
+    }
+
     // 2.4) 检查祭司是否在箭塔保护范围内（距最近塔 <= 6 格）——转化必须在塔下进行
     bool nearTower = false;
     for (const tagBuilding& b : info.buildings) {
@@ -2504,7 +2586,7 @@ void UsrAI::handlePriest(const tagInfo& info)
     }
 
     // 3) 有转化目标且节流通过 → 主动转化（敌人打别人时也转化，不等敌人打自己）
-    if (needConvertOrder) {
+    if (needConvertOrder && !needLure) {   // 【修复·D】有"第二个战车弓兵"在场 → 先拉怪，不主动转化
         HumanAction(priestSN, target);
         m_issued.insert(priestSN);
         m_convertTarget = target;
@@ -2520,26 +2602,17 @@ void UsrAI::handlePriest(const tagInfo& info)
     //   触发：第二波窗口 + 没在转化 + 未濒死 + 场上有存活敌对战车弓兵（≤14格 或 正锁定祭司）
     //   位置：放在"主动转化"之后 → 有目标可转化时先转化，冷却期/无目标时才去拉怪。
     {
-        const bool wave2Lure = (info.GameFrame > FRAME_WAVE2 - 3000
-                                && info.GameFrame <= FRAME_WAVE3);
-        if (wave2Lure && !inConversion && !criticalBlood) {
-            const tagArmy* ca = nullptr;
-            double caD = 1e18;
-            for (const tagArmy& e : info.enemy_armies) {
-                if (e.Blood <= 0 || e.Sort != AT_CHARIOT_ARCHER) continue;
-                double d = calDistance(priest->DR, priest->UR, e.DR, e.UR);
-                if (d < caD) { caD = d; ca = &e; }
-            }
-            if (ca != nullptr
-                && (caD <= 14.0 * BLOCKSIDELENGTH || ca->WorkObjectSN == priestSN)) {
-                int hx, hy;
-                getPriestHome(info, hx, hy);
-                if (hx >= 0) {
-                    double gx = (double)hx * BLOCKSIDELENGTH;
-                    double gy = (double)hy * BLOCKSIDELENGTH;
-                    if (movePriest(priestSN, priest->DR, priest->UR, gx, gy, info.GameFrame))
-                        return;             // 已下令撤向箭塔 → 本帧结束
-                }
+        // 【修复·C′】撤退终点不再是"塔中心"，而是"塔背面"（priestRetreatPoint）：
+        //   站到塔背对追兵的一侧，追兵要打到祭司就必须绕过去 → 距塔 7-1.5 ≈ 5.5 格
+        //   < 箭塔射程 7 → 箭塔锁得到它 → 仇恨从祭司转到塔上。
+        if (needLure && lureCA != nullptr && !inConversion && !criticalBlood) {
+            int hx, hy;
+            getPriestHome(info, hx, hy);
+            if (hx >= 0) {
+                double gx, gy;
+                priestRetreatPoint(lureCA->DR, lureCA->UR, hx, hy, gx, gy);
+                if (movePriest(priestSN, priest->DR, priest->UR, gx, gy, info.GameFrame))
+                    return;             // 已下令撤向"塔背面" → 本帧结束
             }
         }
     }
@@ -2562,7 +2635,11 @@ void UsrAI::handlePriest(const tagInfo& info)
         int hx, hy;
         getPriestHome(info, hx, hy);
         if (hx >= 0) {
-            movePriest(priestSN, priest->DR, priest->UR, (double)hx * BLOCKSIDELENGTH, (double)hy * BLOCKSIDELENGTH, info.GameFrame);
+            // 【修复·C′】撤退终点同样用"塔背面"，否则下一步的"回塔下"会把他拉回塔心，
+            //   追兵又停在射程外 → 拉怪再次失效。
+            double gx, gy;
+            priestRetreatPoint(threat->DR, threat->UR, hx, hy, gx, gy);
+            movePriest(priestSN, priest->DR, priest->UR, gx, gy, info.GameFrame);
         }
         return;
     }
