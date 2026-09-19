@@ -1088,9 +1088,39 @@ int UsrAI::findNearestTree(const tagInfo& info, int farmerSN)
             cnt[w.WorkObjectSN]++;
 
     // 收集所有树（含剩余量的）
+    // 【修复·2 树被围住挤不进去】只把"8 邻域里至少有一格能站人"的树算作候选：
+    //   树在引擎里是静态障碍；一棵被其他树/石头/建筑围死的树，农民永远挤不到它旁边
+    //   （引擎要求贴到半格内才能采）→ 他站在树丛外圈罚站、砍不到木头 →
+    //   120 帧后被判卡、拉黑、拽回市中心 → 再换一棵更内圈的树……
+    //   实测：木头停在 10，面板里"设置工作目标为 树 X"紧跟"移动至(市中心)"反复刷。
+    //   只挑"能从外圈站进去"的树后，砍伐顺序自然变成由外向内，
+    //   外圈砍掉后内圈的树自动变成可站 → 不会再出现挤不进去的目标。
+    //   兜底：万一所有树都挤不进去（极端地图），退回原行为，不至于完全没柴可砍。
     std::vector<const tagResource*> trees;
-    for (const tagResource& r : info.resources)
-        if (r.Type == RESOURCE_TREE && r.Cnt > 0) trees.push_back(&r);
+    std::vector<const tagResource*> treesAll;
+    {
+        // 复用现成的 isStaticBlock：海洋/建筑/静态资源 = 不可站，空地/单位 = 可站
+        auto standable = [&](int nx, int ny) -> bool {
+            if (nx < 0 || nx >= 100 || ny < 0 || ny >= 100) return false;
+            return !isStaticBlock(nx, ny);
+        };
+        auto treeOk = [&](const tagResource* t) -> bool {
+            int bx = (int)(t->DR / BLOCKSIDELENGTH);
+            int by = (int)(t->UR / BLOCKSIDELENGTH);
+            for (int dx = -1; dx <= 1; ++dx)
+                for (int dy = -1; dy <= 1; ++dy) {
+                    if (dx == 0 && dy == 0) continue;
+                    if (standable(bx + dx, by + dy)) return true;   // 邻域有一格能站 → 砍得到
+                }
+            return false;
+        };
+        for (const tagResource& r : info.resources) {
+            if (r.Type != RESOURCE_TREE || r.Cnt <= 0) continue;
+            treesAll.push_back(&r);
+            if (treeOk(&r)) trees.push_back(&r);
+        }
+        if (trees.empty()) trees = treesAll;      // 全挤不进去 → 退回原行为
+    }
     if (trees.empty()) return -1;
 
     int bestSn = -1;
@@ -1262,217 +1292,65 @@ void UsrAI::buildBuildings(const tagInfo& info)
         //   6 座房只有 28 人口，而"20 农民 + 祭司 + 第一波祭司转化的敌方单位"正好占满
         //   → trainArmy 首行 Human_Num >= Human_MaxNum 判断直接 return → 第二波一个新兵都造不出来，
         //     只能靠第一波转化的部队硬顶（实测现象）。
-        //   现在：人口接近上限就继续补房（最多 10 座 = 44 人口）。
+        //   现在：住房阶梯 4/6/8 不变；**8 座达成后一口气补到 12 座**（≈50 人口，到上限）。
         //   注意只在靶场已建后才补，避免抢在"市场/兵营/靶场"这条升级关键链之前。
         int homes = countBuilding(info, BUILDING_HOME);
         int houseTarget = (countBuilding(info, BUILDING_RANGE) > 0) ? 6 : 4;
         bool bronzeNow2 = (info.civilizationStage >= CIVILIZATION_BRONZEAGE);
         if (bronzeNow2 && countBuilding(info, BUILDING_RANGE) > 0) houseTarget = 8;
-        if (countBuilding(info, BUILDING_RANGE) > 0
-            && (int)info.Human_Num >= (int)info.Human_MaxNum - 2
-            && homes < 10) {
-            houseTarget = homes + 1;         // 人口卡住 → 再加一座房（给军队腾人口）
+        // 【用户要求】原来的 4/6/8 阶梯逻辑**不动**；8 座达成后**不等人口告急**，
+        //   直接把目标抬到 12 → 一口气从 8 座建到 12 座（≈50 人口，正好到上限）。
+        //   原来这里是"人口≥上限-2 就把目标设为 现有房数+1"，每次只加 1 座、还得等人口再满
+        //   —— 现在按"房≥8"直接触发，不再依赖人口。
+        int houseNormalTarget = houseTarget;      // 正常目标(4/6/8)，供马厩当"住房已完成"的前提
+        if (bronzeNow2 && countBuilding(info, BUILDING_RANGE) > 0 && homes >= 8) {
+            houseTarget = 12;
         }
-        // 【用户要求·第二波后·一人一田】农田目标改为按"食物采集人数"（= 农民的一半）扩田：
-        //   打猎采光后要转种田的农民，必须先有田可种 → 先把农田建出来（每块 75 木）
-        //   上限 8 块（木头不够时自然停下）；第二波前仍保持 3 块
-        // 【用户要求】地图上还有浆果/动物 → 优先采它们：农田最多保留 3 块（用户原策略），
-        //   等地图食物采光后才按"食物采集人数"扩建（最多 8 块）→ 不提前浪费木头
-        int farmWant = 3;
-        // 【修复】食物告急（<200）时不被"地图还有食物"挡住：远水不解近渴，先把田开出来
-        if (info.GameFrame > FRAME_WAVE2 && (!mapFoodLeft(info) || info.Meat < 200)) {
-            farmWant = (int)info.farmers.size() / 2;
-            if (farmWant < 3) farmWant = 3;
-            if (farmWant > 8) farmWant = 8;
-        }
+        // 【农田不再由专职建造者负责】原来这里算 farmWant（第二波后按食物采集人数扩田）。
+        //   现在农田全部由食物系农民自己建，本函数里的两处农田分支都已删除 → 不再需要它。
 
         // 记录箭塔位置（靶场要建在箭塔附近）
         int towerBX = -1, towerBY = -1;
         for (const tagBuilding& tb : info.buildings)
             if (tb.Type == BUILDING_ARROWTOWER) { towerBX = tb.BlockDR; towerBY = tb.BlockUR; break; }
 
-        // ===== 【紧急·食物告急】第二波后食物见底 → 专职建造者先把农田补出来 =====
-        //   农田采空会被引擎直接删除（Core.cpp:255-269 "采集完成"）→ 必须不断补种；
-        //   而建造链里农田排在最后，第二波后 马厩/学院/箭塔/住房 会把建造者占满 → 农田轮不到。
-        if (!built && info.GameFrame > FRAME_WAVE2 && info.Meat < 150
-            && countBuilding(info, BUILDING_FARM) < farmWant
-            && countBuilding(info, BUILDING_MARKET) > 0
-            && info.Wood >= BUILD_FARM_WOOD) {
-            int gxe = m_centerX, gye = m_centerY;
-            for (const tagBuilding& b : info.buildings)
-                if (b.Type == BUILDING_GRANARY) { gxe = b.BlockDR; gye = b.BlockUR; break; }
-            int xe, ye;
-            if (findBuildBlock(info, xe, ye, 3, 3, gxe, gye)) {
-                HumanBuild(builder, BUILDING_FARM, xe, ye);
-                m_issued.insert(builder);
-                return;                     // 本帧只下这一条令
-            }
-        }
+        // 【已删除·用户要求】原"紧急·食物告急 → 专职建造者补农田"。
+        //   农田不再由专职建造者建造：改由"要采这块田的食物系农民"自己建
+        //   （manageVillagers 里"空闲的食物系农民 → 自己去建一块农田"，可多人并行）。
+        //   原来这一条条件(食<150)长期成立，会把建造者永久霸占 → 马厩永远轮不到。
 
-        // ===== 【紧急·人口满】人口卡住 → 住房抢先 =====
-        //   实测：房5、人口22/24、调试行一直显示"造兵:人口已满(需补房)"，但唯一建造者被
-        //   农田告急/马厩/学院/箭塔 依次占着 → 住房排在最后永远轮不到 → 兵和农民都造不出来。
-        //   住房只要 30 木却能立刻解锁人口，所以放在"食物紧急"之后、其它建设之前。
-        if (!built && countBuilding(info, BUILDING_HOME) < houseTarget
-            && (int)info.Human_Num >= (int)info.Human_MaxNum - 2
-            && info.Wood >= BUILD_HOUSE_WOOD) {
-            int xh, yh;
-            if (findBuildBlock(info, xh, yh, 2, 2)) {
-                HumanBuild(builder, BUILDING_HOME, xh, yh);
-                m_issued.insert(builder);
-                return;
-            }
-        }
+        // 【已删除·用户要求】原"紧急·人口满 → 补房"入口。
+        //   住房现在只在"优先级 2"这一处建（目标 4/6/8，8 座后一口气到 12），不再有第二个入口。
 
-        // ===== 【3.0.7g 新增·第二波后发育阶段】帧 > FRAME_WAVE2 时的建设优先级 =====
-        //   为什么需要：马厩/学院原本排在 else-if 链末尾（住房→市场→兵营→靶场→马厩→学院），
-        //   而"人口临界就补房"（houseTarget = 现有房数+1）会让**住房分支永远成立**，
-        //   把马厩/学院彻底挡在后面 → 第二波之后骑兵/方阵兵永远出不来。
-        //   第二波打完（经济已成型）后把这两栋提到链首，为第三波（2 投石车 + 战车弓/复合弓）
-        //   和反攻攒兵：骑兵(速度4/150血，切投石车、救祭司) + 方阵兵(120血/17攻，正面肉盾)。
-        bool afterWave2 = (info.GameFrame > FRAME_WAVE2);
-        if (afterWave2) {
-            if (countBuilding(info, BUILDING_STABLE) == 0 && info.Wood >= BUILD_STABLE_WOOD) {
-                int sx, sy;
-                if (findBuildBlock(info, sx, sy, 3, 3)) {
-                    HumanBuild(builder, BUILDING_STABLE, sx, sy);
-                    m_issued.insert(builder);
-                    return;                     // 本帧只下这一条令（保证一帧只有一条建造指令）
-                }
-            }
-            if (countBuilding(info, BUILDING_COLLAGE) == 0
-                && info.Wood >= BUILD_COLLAGE_WOOD) {
-                int cx2, cy2;
-                if (findBuildBlock(info, cx2, cy2, 3, 3)) {
-                    HumanBuild(builder, BUILDING_COLLAGE, cx2, cy2);
-                    m_issued.insert(builder);
-                    return;
-                }
-            }
-        }
-
-        // ===== 【用户要求】靶场建好后立刻补第二座箭塔 =====
-        //   引擎强制前置（Development.cpp:768-769）：建塔需要"箭塔科技"，而该科技只能在谷仓研发
-        //   （50 食 + 10 秒）。石头方面：BUILD_ARROWTOWER_STONE=150 = 开局 INITIAL_STONE=150，
-        //   且我们全程不采石（targetStone=0）→ 这 150 石一直闲置，正好够第二座塔。
-        //   优先块放在住房之前 → 不被"人口临界补房"挡住（这也是马厩/学院曾经被挡死的原因）。
-        //   顺序：谷仓(120木) → 箭塔科技(50食) → 箭塔(150石)。
-        if (!built && countBuilding(info, BUILDING_RANGE) > 0
-            && countBuilding(info, BUILDING_ARROWTOWER) < 2
-            && info.Stone >= BUILD_ARROWTOWER_STONE) {
-            if (m_researchCount[BUILDING_GRANARY_ARROWTOWER] > 0) {
-                // 科技已好 → 在第一座箭塔旁边建第二座（交叉火力）
-                int tx2, ty2;
-                bool found2 = false;
-                if (towerBX >= 0) found2 = findBuildBlock(info, tx2, ty2, 2, 2, towerBX, towerBY);
-                if (!found2) found2 = findBuildBlock(info, tx2, ty2, 2, 2);
-                if (found2) {
-                    HumanBuild(builder, BUILDING_ARROWTOWER, tx2, ty2);
-                    m_issued.insert(builder);
-                    return;                     // 本帧只下这一条建造令
-                }
-            } else if (countBuilding(info, BUILDING_GRANARY) == 0
-                       && info.Wood >= BUILD_GRANARY_WOOD) {
-                // 还没有谷仓（箭塔科技没地方研发）→ 先补一座谷仓
-                int gx2, gy2;
-                if (findBuildBlock(info, gx2, gy2, 3, 3)) {
-                    HumanBuild(builder, BUILDING_GRANARY, gx2, gy2);
-                    m_issued.insert(builder);
-                    return;
-                }
-            }
-        }
-
-        // 1) 住房（先建到 4 座）
-        if (countBuilding(info, BUILDING_HOME) < houseTarget && info.Wood >= BUILD_HOUSE_WOOD) {
-            int x, y;
-            if (findBuildBlock(info, x, y, 2, 2)) {
-                HumanBuild(builder, BUILDING_HOME, x, y);
-                m_issued.insert(builder);
-                built = true;
-            }
-        }
-        // 2) 箭塔（1 座，用初始 150 石；发育策略：靶场建在它附近）
-        else if (countBuilding(info, BUILDING_HOME) >= 4
-            && m_researchCount[BUILDING_GRANARY_ARROWTOWER] > 0
-            && countBuilding(info, BUILDING_ARROWTOWER) < 1
-            && info.Stone >= BUILD_ARROWTOWER_STONE) {
-            int x, y;
-            if (findBuildBlock(info, x, y, 2, 2)) {
-                HumanBuild(builder, BUILDING_ARROWTOWER, x, y);
-                m_issued.insert(builder);
-                built = true;
-            }
-        }
-        // 3) 市场（【发育策略】先建市场 → 立即研发伐木科技，加速攒木头）
-        else if (countBuilding(info, BUILDING_MARKET) == 0 && info.Wood >= BUILD_MARKET_WOOD) {
-            int x, y;
-            if (findBuildBlock(info, x, y, 3, 3)) {
-                HumanBuild(builder, BUILDING_MARKET, x, y);
-                m_issued.insert(builder);
-                built = true;
-            }
-        }
-        // 4) 兵营（靶场前置）
-        else if (countBuilding(info, BUILDING_MARKET) > 0
-            && countBuilding(info, BUILDING_ARMYCAMP) == 0 && info.Wood >= BUILD_ARMYCAMP_WOOD) {
-            int x, y;
-            if (findBuildBlock(info, x, y, 3, 3)) {
-                HumanBuild(builder, BUILDING_ARMYCAMP, x, y);
-                m_issued.insert(builder);
-                built = true;
-            }
-        }
-        // 5) 靶场（升级必需；【发育策略】建在箭塔附近）
-        else if (countBuilding(info, BUILDING_MARKET) > 0
-            && countBuilding(info, BUILDING_ARMYCAMP) > 0
-            && countBuilding(info, BUILDING_RANGE) == 0 && info.Wood >= BUILD_RANGE_WOOD) {
-            int x, y;
-            bool found = false;
-            if (towerBX >= 0) found = findBuildBlock(info, x, y, 3, 3, towerBX, towerBY);
-            if (!found) found = findBuildBlock(info, x, y, 3, 3);
-            if (found) {
-                HumanBuild(builder, BUILDING_RANGE, x, y);
-                m_issued.insert(builder);
-                built = true;
-            }
-        }
-        // 6) 马厩（升级后首选：骑兵克远程）
-        else if (info.civilizationStage >= CIVILIZATION_BRONZEAGE
+        // ===== 【用户要求·建造优先级重排】1 马厩 → 2 住房 → 3 金矿旁仓库 → 4 学院 =====
+        //   马厩：前提是"兵营在 + 靶场已建 + 住房正常目标(8/6)已完成"，也就是
+        //   "靶场和 8 座住房什么的都建完之后"第一个建它；放在最前面是为了不被
+        //   后面的补房/补仓库饿死（原来它排在"紧急补房"之后 → 永远轮不到）。
+        if (!built && info.civilizationStage >= CIVILIZATION_BRONZEAGE   // 前提：铜器后
+            && countBuilding(info, BUILDING_ARMYCAMP) > 0     // 引擎前置：马厩←兵营
+            && countBuilding(info, BUILDING_RANGE) > 0        // 靶场已建
+            && homes >= houseNormalTarget                     // 住房目标(8/6)已完成
             && countBuilding(info, BUILDING_STABLE) == 0 && info.Wood >= BUILD_STABLE_WOOD) {
             int x, y;
             if (findBuildBlock(info, x, y, 3, 3)) {
                 HumanBuild(builder, BUILDING_STABLE, x, y);
                 m_issued.insert(builder);
-                built = true;
+                return;                     // 本帧只下这一条令（搬到高位后必须立刻结束）
             }
         }
-        // 7) 学院（升级后）
-        else if (info.civilizationStage >= CIVILIZATION_BRONZEAGE
-            && countBuilding(info, BUILDING_COLLAGE) == 0 && info.Wood >= BUILD_COLLAGE_WOOD) {
+
+        // ===== 2) 住房：目标 4→6→8（正常），8 座达成后一口气补到 12（不等人口告急）=====
+        if (countBuilding(info, BUILDING_HOME) < houseTarget && info.Wood >= BUILD_HOUSE_WOOD) {
             int x, y;
-            if (findBuildBlock(info, x, y, 3, 3)) {
-                HumanBuild(builder, BUILDING_COLLAGE, x, y);
+            if (findBuildBlock(info, x, y, 2, 2)) {
+                HumanBuild(builder, BUILDING_HOME, x, y);
                 m_issued.insert(builder);
-                built = true;
+                return;                     // 本帧只下这一条令（搬到高位后必须立刻结束）
             }
         }
-        // 8) 农田（升级后，谷仓旁）
-        else if (info.civilizationStage >= CIVILIZATION_BRONZEAGE
-            && countBuilding(info, BUILDING_MARKET) > 0
-            && countBuilding(info, BUILDING_FARM) < farmWant
-            && info.Wood >= BUILD_FARM_WOOD) {
-            int gx = m_centerX, gy = m_centerY;
-            for (const tagBuilding& b : info.buildings)
-                if (b.Type == BUILDING_GRANARY) { gx = b.BlockDR; gy = b.BlockUR; break; }
-            int x, y;
-            if (findBuildBlock(info, x, y, 3, 3, gx, gy)) {
-                HumanBuild(builder, BUILDING_FARM, x, y);
-                m_issued.insert(builder);
-                built = true;
-            }
-        }
-        // 6) 【发育策略】金矿旁仓库：靶场已建、两座新房已补（房≥6）、铜器后 → 建设者去金矿旁建仓库
+
+        // ===== 3) 金矿旁仓库（从原 15 号位提前到这里）=====
+        // 【发育策略】金矿旁仓库：靶场已建、两座新房已补（房≥6）、铜器后 → 建设者去金矿旁建仓库
         //    建好后新生成的农民就近采金（原有伐木/种田农民不动）
         if (!built
             && countBuilding(info, BUILDING_RANGE) > 0
@@ -1506,11 +1384,98 @@ void UsrAI::buildBuildings(const tagInfo& info)
                     if (findBuildBlock(info, x, y, 3, 3, gbx, gby)) {
                         HumanBuild(builder, BUILDING_STOCK, x, y);
                         m_issued.insert(builder);
-                        built = true;
+                        return;                     // 本帧只下这一条令（搬到高位后必须立刻结束）
                     }
                 }
             }
         }
+
+        // ===== 4) 学院（从原 13 号位提前到这里；加"马厩已建"的引擎前置）=====
+        if (!built && info.civilizationStage >= CIVILIZATION_BRONZEAGE
+            && countBuilding(info, BUILDING_STABLE) > 0          // 引擎前置：学院←马厩
+            && countBuilding(info, BUILDING_COLLAGE) == 0 && info.Wood >= BUILD_COLLAGE_WOOD) {
+            int x, y;
+            if (findBuildBlock(info, x, y, 3, 3)) {
+                HumanBuild(builder, BUILDING_COLLAGE, x, y);
+                m_issued.insert(builder);
+                return;                     // 本帧只下这一条令（搬到高位后必须立刻结束）
+            }
+        }
+
+
+        // ===== 【用户要求】靶场建好后立刻补箭塔（删掉链里的箭塔①后，第一座也由这里出）=====
+        //   引擎强制前置（Development.cpp:768-769）：建塔需要"箭塔科技"，而该科技只能在谷仓研发
+        //   （50 食 + 10 秒）。石头方面：BUILD_ARROWTOWER_STONE=150 = 开局 INITIAL_STONE=150，
+        //   且我们全程不采石（targetStone=0）→ 这 150 石一直闲置，正好够第二座塔。
+        //   优先块放在住房之前 → 不被"人口临界补房"挡住（这也是马厩/学院曾经被挡死的原因）。
+        //   顺序：谷仓(120木) → 箭塔科技(50食) → 箭塔(150石)。
+        if (!built && countBuilding(info, BUILDING_RANGE) > 0
+            && countBuilding(info, BUILDING_ARROWTOWER) < 2
+            && info.Stone >= BUILD_ARROWTOWER_STONE) {
+            if (m_researchCount[BUILDING_GRANARY_ARROWTOWER] > 0) {
+                // 科技已好 → 在第一座箭塔旁边建第二座（交叉火力）
+                int tx2, ty2;
+                bool found2 = false;
+                if (towerBX >= 0) found2 = findBuildBlock(info, tx2, ty2, 2, 2, towerBX, towerBY);
+                if (!found2) found2 = findBuildBlock(info, tx2, ty2, 2, 2);
+                if (found2) {
+                    HumanBuild(builder, BUILDING_ARROWTOWER, tx2, ty2);
+                    m_issued.insert(builder);
+                    return;                     // 本帧只下这一条建造令
+                }
+            } else if (countBuilding(info, BUILDING_GRANARY) == 0
+                       && info.Wood >= BUILD_GRANARY_WOOD) {
+                // 还没有谷仓（箭塔科技没地方研发）→ 先补一座谷仓
+                int gx2, gy2;
+                if (findBuildBlock(info, gx2, gy2, 3, 3)) {
+                    HumanBuild(builder, BUILDING_GRANARY, gx2, gy2);
+                    m_issued.insert(builder);
+                    return;
+                }
+            }
+        }
+
+        // 【已上移·用户要求】原链里的"住房"已提到优先级 2（目标 4/6/8，8 座达成后到 12）。
+        // 【已删除·用户要求】原链里的"箭塔①"。第一座箭塔改由"优先级 5"（箭塔②）负责，
+        //   它要求靶场已建 → 正好是"靶场建好后立刻补箭塔"的顺序。
+        // ===== 主链（互斥，只走一条）：市场 → 兵营 → 靶场 =====
+        //   （原链首的"住房""箭塔①"已分别上移/删除，"马厩/学院/农田"也已移走）
+        if (countBuilding(info, BUILDING_MARKET) == 0 && info.Wood >= BUILD_MARKET_WOOD) {
+            int x, y;
+            if (findBuildBlock(info, x, y, 3, 3)) {
+                HumanBuild(builder, BUILDING_MARKET, x, y);
+                m_issued.insert(builder);
+                built = true;
+            }
+        }
+        // 4) 兵营（靶场前置）
+        else if (countBuilding(info, BUILDING_MARKET) > 0
+            && countBuilding(info, BUILDING_ARMYCAMP) == 0 && info.Wood >= BUILD_ARMYCAMP_WOOD) {
+            int x, y;
+            if (findBuildBlock(info, x, y, 3, 3)) {
+                HumanBuild(builder, BUILDING_ARMYCAMP, x, y);
+                m_issued.insert(builder);
+                built = true;
+            }
+        }
+        // 5) 靶场（升级必需；【发育策略】建在箭塔附近）
+        else if (countBuilding(info, BUILDING_MARKET) > 0
+            && countBuilding(info, BUILDING_ARMYCAMP) > 0
+            && countBuilding(info, BUILDING_RANGE) == 0 && info.Wood >= BUILD_RANGE_WOOD) {
+            int x, y;
+            bool found = false;
+            if (towerBX >= 0) found = findBuildBlock(info, x, y, 3, 3, towerBX, towerBY);
+            if (!found) found = findBuildBlock(info, x, y, 3, 3);
+            if (found) {
+                HumanBuild(builder, BUILDING_RANGE, x, y);
+                m_issued.insert(builder);
+                built = true;
+            }
+        }
+        // 【已上移·用户要求】原链里的"马厩"已提到优先级 1。
+        // 【已上移·用户要求】原链里的"学院"已提到优先级 4。
+        // 【已删除·用户要求】原链里的"农田"。农田一律由食物系农民自己建。
+        // 【已上移·用户要求】原 15 号位的"金矿旁仓库"已提到优先级 3。
         // （羚羊堆仓库/浆果堆谷仓由采集者负责，见 buildResourceDepots）
         if (!built) return;  // 无可建建筑 → 本帧结束（绝不抽调其他农民帮忙）
     }
