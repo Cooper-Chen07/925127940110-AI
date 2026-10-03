@@ -2115,7 +2115,22 @@ void UsrAI::defense(const tagInfo& info)
     getPriestHome(info, hx, hy);
     double homeDR = (double)hx * BLOCKSIDELENGTH;
     double homeUR = (double)hy * BLOCKSIDELENGTH;
-    bool enemyVisible = !(info.enemy_armies.empty() && info.enemy_farmers.empty());
+    // 【修复·探路兵把全军拉走】原来 enemyVisible = "快照里有任何敌人" ✗
+    //   而敌方**单位**是按 getvisible() 过滤进快照的（Core.cpp:479/505）——
+    //   探路兵跑到敌营附近就会把敌方部队"点亮" → 触发下面的全军迎击分支
+    //   （战车弓优先 / 其它远程 / 最近敌人，全都没有距离限制）→ 所有兵跨全图去打。
+    //   现在：只有"离布防点 DEFEND_R 格内"的敌人才算来犯。
+    //   第一~三波的敌人是冲基地来的，必进此圈 → 防守行为不变 ✓
+    const double DEFEND_R = 22.0 * BLOCKSIDELENGTH;   // 迎击半径（格），可调
+    bool enemyVisible = false;
+    for (const tagArmy& e : info.enemy_armies) {
+        if (calDistance(e.DR, e.UR, homeDR, homeUR) <= DEFEND_R) { enemyVisible = true; break; }
+    }
+    if (!enemyVisible) {
+        for (const tagFarmer& e : info.enemy_farmers) {
+            if (calDistance(e.DR, e.UR, homeDR, homeUR) <= DEFEND_R) { enemyVisible = true; break; }
+        }
+    }
 
     for (const tagArmy& a : info.armies) {
         if (a.Sort == AT_PRIEST || a.Sort == AT_SCOUT) continue;   // 祭司/侦察骑兵单独调度
@@ -3000,6 +3015,367 @@ static void scoutPhaseS(UsrAI* self, const tagInfo& info)
     }
 }
 
+// ============================================================
+// 【反攻阶段】集结 → 推进拉扯 → 交战 → 祭司冲锋转化武器工程厂
+//   胜利条件（MainWidget::isWin）：player[0]->build 里出现
+//     getNum()==BUILDING_SIEGE && isConverted() && !isDie()
+//   → 只能靠祭司贴上去转化，**绝不能把厂打掉**（打掉就永远赢不了）。
+//
+//   为什么必须"区域集结"：引擎寻路查 map_Object[][].empty()，一格站了人就当不可达
+//   → 所有人下一个点只有一个人能到位；必须用一个区域、每格一个兵（文档 44 行）。
+//
+//   隔离：触发线没到之前一行都不执行；只对"空闲"的兵下令；
+//   调用点在 processData 最后 → 同帧最后一条令，引擎按对象去重时保留它，
+//   所以**不需要改 defense()**（defense 只下令空闲的兵）。
+// ============================================================
+static const int ATK_EARLY_FRAME  = 21000;   // 提前线：第三波刚开始 + 兵很多 → 早点打出去
+static const int ATK_EARLY_ARMY   = 24;
+static const int ATK_MAIN_FRAME   = 22500;   // 主启动线（推荐）
+static const int ATK_MAIN_ARMY    = 18;
+static const int ATK_LAST_FRAME   = 27000;   // 兜底线：再不打就等着超时判负
+static const int ATK_LAST_ARMY    = 10;
+static const int ATK_RALLY_BACK   = 4;       // 集结点 = 敌方目标往自家方向退几格
+static const int ATK_RALLY_R      = 2;       // 集结区半径（2 → 5×5，每格一个兵）
+static const int ATK_FRONT_STEP   = 6;       // 推进时全体前压几格（再重新铺开）
+static const int ATK_NEAR_ENEMY   = 8;       // 兵身边多少格内有敌人 → 直接打它
+static const int ATK_ASSAULT_NEAR = 6;       // 突击者多少格内有敌人 → 撤回初始位置
+static const int ATK_PUSH_FRAME   = 34000;   // 到这一帧无论如何冲锋
+static const int ATK_MAX_ORDER    = 8;       // 每帧最多下这么多条令（省引擎的指令配额）
+static const int ATK_PRIEST_SAFE  = 10;      // 祭司距厂多少格内就贴上去转化
+
+static int m_atkOn = 0;                       // 1=反攻已启动
+static int m_atkPhase = 0;                    // 0=集结 1=推进拉扯 2=交战 3=冲锋
+static int m_atkTargetX = -1, m_atkTargetY = -1;   // 进攻目标点
+static int m_atkRallyX = -1, m_atkRallyY = -1;     // 集结点
+static int m_atkFrontX = -1, m_atkFrontY = -1;     // 当前前压点
+static int m_assaultSN = -1;                       // 突击者 SN
+static double m_assaultPX = 0, m_assaultPY = 0;    // 突击者初始位置（细节坐标）
+static int m_atkPhaseFrame = -9999;                // 进入当前阶段的帧
+static int m_atkDbgFrame = -9999;                  // 诊断输出节流
+
+static double atkBD(int b) { return ((double)b + 0.5) * BLOCKSIDELENGTH; }
+
+static double atkDist(double x1, double y1, double x2, double y2)
+{
+    const double dx = x1 - x2, dy = y1 - y2;
+    return sqrt(dx * dx + dy * dy);
+}
+
+// 战斗单位数（不含祭司/侦察骑兵）
+static int atkArmyCount(const tagInfo& info)
+{
+    int n = 0;
+    for (const tagArmy& a : info.armies)
+        if (a.Sort != AT_PRIEST && a.Sort != AT_SCOUT) ++n;
+    return n;
+}
+
+// 目标点：武器工程厂 > 敌方建筑群中心 > 地图对角（降级链，保证永远有地方可去）
+// 集结点：目标点往自家（市中心）方向退 ATK_RALLY_BACK 格
+static void atkPickPoints(const tagInfo& info)
+{
+    if (m_siegeSN >= 0 && m_siegeX >= 0) {
+        m_atkTargetX = m_siegeX;
+        m_atkTargetY = m_siegeY;
+    } else if (m_enemyBaseX >= 0) {
+        m_atkTargetX = m_enemyBaseX;
+        m_atkTargetY = m_enemyBaseY;
+    } else {
+        const int mL = MAP_L, mU = MAP_U;
+        const int cx = (m_centerX >= 0) ? m_centerX : mL / 2;
+        const int cy = (m_centerY >= 0) ? m_centerY : mU / 2;
+        m_atkTargetX = (cx < mL / 2) ? (mL - 10) : 10;
+        m_atkTargetY = (cy < mU / 2) ? (mU - 10) : 10;
+    }
+    const int hx = (m_centerX >= 0) ? m_centerX : MAP_L / 2;
+    const int hy = (m_centerY >= 0) ? m_centerY : MAP_U / 2;
+    double vx = (double)(hx - m_atkTargetX), vy = (double)(hy - m_atkTargetY);
+    double len = sqrt(vx * vx + vy * vy);
+    if (len < 1e-6) { vx = -1.0; vy = 0.0; len = 1.0; }
+    m_atkRallyX = m_atkTargetX + (int)(vx / len * ATK_RALLY_BACK + 0.5);
+    m_atkRallyY = m_atkTargetY + (int)(vy / len * ATK_RALLY_BACK + 0.5);
+    m_atkFrontX = m_atkRallyX;
+    m_atkFrontY = m_atkRallyY;
+    const int mL2 = MAP_L, mU2 = MAP_U;
+    if (m_atkRallyX < 1) m_atkRallyX = 1;
+    if (m_atkRallyX > mL2 - 2) m_atkRallyX = mL2 - 2;
+    if (m_atkRallyY < 1) m_atkRallyY = 1;
+    if (m_atkRallyY > mU2 - 2) m_atkRallyY = mU2 - 2;
+    m_atkFrontX = m_atkRallyX;
+    m_atkFrontY = m_atkRallyY;
+}
+
+// 以 (bx,by) 为中心、半径 r 的方块里第 slot 个格子的坐标（每格一个兵，避免"站满不可达"）
+static void atkSlotPos(int bx, int by, int r, int slot, int& sx, int& sy)
+{
+    const int side = 2 * r + 1;
+    int k = slot % (side * side);
+    if (k < 0) k += side * side;
+    sx = bx + (k % side) - r;
+    sy = by + (k / side) - r;
+    if (sx < 1) sx = 1;
+    if (sx > MAP_L - 2) sx = MAP_L - 2;
+    if (sy < 1) sy = 1;
+    if (sy > MAP_U - 2) sy = MAP_U - 2;
+}
+
+// 前压点：从集结点朝目标点推进 step 格（不越过目标点）
+static void atkAdvanceFront(int step)
+{
+    double vx = (double)(m_atkTargetX - m_atkRallyX);
+    double vy = (double)(m_atkTargetY - m_atkRallyY);
+    double len = sqrt(vx * vx + vy * vy);
+    if (len < 1e-6) return;
+    m_atkFrontX = m_atkRallyX + (int)(vx / len * step + 0.5);
+    m_atkFrontY = m_atkRallyY + (int)(vy / len * step + 0.5);
+}
+
+static void attackPhase(UsrAI* self, const tagInfo& info)
+{
+    const int f = info.GameFrame;
+
+    // 找祭司
+    int priestSN = -1;
+    const tagArmy* priest = nullptr;
+    for (const tagArmy& a : info.armies)
+        if (a.Sort == AT_PRIEST) { priestSN = a.SN; priest = &a; break; }
+
+    const int army = atkArmyCount(info);
+
+    // ---------- 1) 触发（三档）----------
+    if (!m_atkOn) {
+        if (m_siegeSN < 0 && m_enemyBaseX < 0) return;     // 还不知道敌方在哪 → 继续等探路
+        const bool okEarly = (f >= ATK_EARLY_FRAME && army >= ATK_EARLY_ARMY);
+        const bool okMain  = (f >= ATK_MAIN_FRAME && army >= ATK_MAIN_ARMY
+                              && (priest == nullptr
+                                  || priest->Blood >= priest->MaxBlood * 3 / 5));
+        const bool okLast  = (f >= ATK_LAST_FRAME && army >= ATK_LAST_ARMY);
+        if (!(okEarly || okMain || okLast)) return;
+        m_atkOn = 1;
+        m_atkPhase = 0;
+        m_atkPhaseFrame = f;
+        m_assaultSN = -1;
+        atkPickPoints(info);
+        if (m_siegeSN >= 0 && m_siegeX >= 0) {             // 已知厂 → 直接冲着厂去
+            m_atkTargetX = m_siegeX;
+            m_atkTargetY = m_siegeY;
+        }
+    }
+
+    // 目标点升级：探路后一旦看到厂，改成冲厂
+    if (m_siegeSN >= 0 && m_siegeX >= 0
+        && (m_atkTargetX != m_siegeX || m_atkTargetY != m_siegeY)) {
+        m_atkTargetX = m_siegeX;
+        m_atkTargetY = m_siegeY;
+        atkPickPoints(info);
+        m_atkTargetX = m_siegeX;
+        m_atkTargetY = m_siegeY;
+    }
+    if (m_atkTargetX < 0) return;
+
+    const double tax = atkBD(m_atkTargetX), tay = atkBD(m_atkTargetY);
+    const int enemyN = (int)info.enemy_armies.size();
+
+    // ---------- 2) 阶段推进 ----------
+    if (m_atkPhase == 0) {
+        // 集结：一半以上的兵到了集结点 3 格内 → 进入推进
+        int inPlace = 0;
+        for (const tagArmy& a : info.armies) {
+            if (a.Sort == AT_PRIEST || a.Sort == AT_SCOUT) continue;
+            if (atkDist(a.DR, a.UR, atkBD(m_atkRallyX), atkBD(m_atkRallyY))
+                <= 3.0 * BLOCKSIDELENGTH) ++inPlace;
+        }
+        if (army > 0 && inPlace * 2 >= army) {
+            m_atkPhase = 1;
+            m_atkPhaseFrame = f;
+            atkAdvanceFront(ATK_FRONT_STEP);
+        }
+    }
+    if (m_atkPhase == 1) {
+        // 敌人靠近目标点 12 格内，或我方已推进到目标 10 格内 → 交战
+        bool go = (atkDist(atkBD(m_atkFrontX), atkBD(m_atkFrontY), tax, tay)
+                   <= 10.0 * BLOCKSIDELENGTH);
+        if (!go) {
+            for (const tagArmy& e : info.enemy_armies) {
+                if (e.Blood <= 0) continue;
+                if (atkDist(e.DR, e.UR, tax, tay) <= 12.0 * BLOCKSIDELENGTH) { go = true; break; }
+            }
+        }
+        if (go) { m_atkPhase = 2; m_atkPhaseFrame = f; }
+    }
+    if (m_atkPhase < 3 && (enemyN <= 4 || f >= ATK_PUSH_FRAME)) {
+        m_atkPhase = 3;                      // 大势已去 / 拖太久 → 冲锋
+        m_atkPhaseFrame = f;
+    }
+
+    // ---------- 3) 给部队下令（只对空闲单位，每帧有限条）----------
+    int ordered = 0;
+    int slot = 0;
+    for (const tagArmy& a : info.armies) {
+        if (ordered >= ATK_MAX_ORDER) break;
+        if (a.Sort == AT_PRIEST || a.Sort == AT_SCOUT) continue;   // 祭司/侦察兵另行处理
+        if (a.SN == m_scoutUnitSN) continue;                        // 探路兵不参与反攻
+        if (a.NowState != HUMAN_STATE_IDLE) continue;                // 只下令空闲的，不打断战斗
+        if (m_issued.count(a.SN)) continue;
+
+        // ① 附近有敌人 → 直接打最近的（队伍优先打远程兵，保护祭司）
+        int target = -1;
+        double bestD = 1e18;
+        if (m_atkPhase >= 2) {
+            int rangedBest = -1;
+            double rangedD = 1e18;
+            for (const tagArmy& e : info.enemy_armies) {
+                if (e.Blood <= 0) continue;
+                const double d = atkDist(a.DR, a.UR, e.DR, e.UR);
+                if (d > ATK_NEAR_ENEMY * BLOCKSIDELENGTH) continue;
+                const bool ranged = (e.Sort == AT_CHARIOT_ARCHER || e.Sort == AT_COMPOSITE_BOWMAN
+                                     || e.Sort == AT_BOWMAN || e.Sort == AT_SLINGER);
+                if (ranged && d < rangedD) { rangedD = d; rangedBest = e.SN; }
+                if (d < bestD) { bestD = d; target = e.SN; }
+            }
+            if (rangedBest >= 0) target = rangedBest;      // 远程兵优先
+        }
+        if (target >= 0) {
+            self->HumanAction(a.SN, target);
+            ++ordered;
+            continue;
+        }
+
+        // ② 没敌人可打 → 走位：
+        //    阶段0 铺在集结区；阶段1/2 铺在前压点；阶段3 直接压向目标点
+        int gx, gy;
+        if (m_atkPhase == 0) {
+            atkSlotPos(m_atkRallyX, m_atkRallyY, ATK_RALLY_R, slot, gx, gy);
+        } else if (m_atkPhase <= 2) {
+            atkSlotPos(m_atkFrontX, m_atkFrontY, ATK_RALLY_R, slot, gx, gy);
+        } else {
+            atkSlotPos(m_atkTargetX, m_atkTargetY, ATK_RALLY_R + 1, slot, gx, gy);
+        }
+        ++slot;
+        if (atkDist(a.DR, a.UR, atkBD(gx), atkBD(gy)) <= 1.2 * BLOCKSIDELENGTH) continue;  // 到位就别再下令
+        self->HumanMove(a.SN, atkBD(gx), atkBD(gy));
+        ++ordered;
+    }
+
+    // ---------- 4) 突击者拉扯（阶段 1/2）----------
+    if (m_atkPhase >= 1 && m_atkPhase <= 2) {
+        // 选/换突击者：离敌方目标点最近的兵
+        const tagArmy* asUnit = nullptr;
+        if (m_assaultSN >= 0) {
+            for (const tagArmy& a : info.armies)
+                if (a.SN == m_assaultSN) { asUnit = &a; break; }
+        }
+        if (asUnit == nullptr) {
+            m_assaultSN = -1;
+            double bd = 1e18;
+            for (const tagArmy& a : info.armies) {
+                if (a.Sort == AT_PRIEST || a.Sort == AT_SCOUT) continue;
+                if (a.SN == m_scoutUnitSN) continue;
+                const double d = atkDist(a.DR, a.UR, tax, tay);
+                if (d < bd) { bd = d; asUnit = &a; }
+            }
+            if (asUnit != nullptr) {
+                m_assaultSN = asUnit->SN;
+                m_assaultPX = asUnit->DR;
+                m_assaultPY = asUnit->UR;
+            }
+        }
+        if (asUnit != nullptr && !m_issued.count(asUnit->SN)) {
+            // 周围 6 格内有敌人 → 撤回初始位置；否则向敌人方向试探前进
+            bool danger = false;
+            for (const tagArmy& e : info.enemy_armies) {
+                if (e.Blood <= 0) continue;
+                if (atkDist(asUnit->DR, asUnit->UR, e.DR, e.UR) <= ATK_ASSAULT_NEAR * BLOCKSIDELENGTH) {
+                    danger = true;
+                    break;
+                }
+            }
+            // 回到初始位置附近 → 撤掉突击手身份，重新选（文档步骤 3）
+            if (atkDist(asUnit->DR, asUnit->UR, m_assaultPX, m_assaultPY) <= 1.5 * BLOCKSIDELENGTH
+                && !danger) {
+                m_assaultSN = -1;
+            } else if (asUnit->NowState == HUMAN_STATE_IDLE) {
+                if (danger) self->HumanMove(asUnit->SN, m_assaultPX, m_assaultPY);
+                else        self->HumanMove(asUnit->SN, tax, tay);
+            }
+        }
+    }
+
+    // ---------- 5) 祭司 ----------
+    if (priest != nullptr && !m_issued.count(priestSN)) {
+        const bool lowBlood = (priest->Blood < priest->MaxBlood * 3 / 5);
+        if (m_atkPhase >= 3) {
+            // 冲锋：贴到厂上转化（唯一的胜利途径）
+            if (m_siegeSN >= 0 && m_siegeX >= 0) {
+                const double dS = atkDist(priest->DR, priest->UR, atkBD(m_siegeX), atkBD(m_siegeY));
+                // 【关键节流】引擎转化施法是 2~6 秒，期间**绝不能再下令**（重复下 HumanAction/
+                //   HumanMove 会重置转化关系 → 永远转不完）。这里复用 handlePriest 的
+                //   m_convertStartFrame 做 200 帧（8 秒）保护窗。
+                const bool canCast = (priest->ConvertCooldown <= 0)
+                    && (m_convertStartFrame < 0 || f - m_convertStartFrame >= 200);
+                if (!canCast) {
+                    // 正在施法/刚下过令 → 本帧完全不碰祭司
+                } else if (dS > ATK_PRIEST_SAFE * BLOCKSIDELENGTH) {
+                    if (priest->NowState == HUMAN_STATE_IDLE)
+                        self->HumanMove(priestSN, atkBD(m_siegeX), atkBD(m_siegeY));
+                } else if (priest->NowState == HUMAN_STATE_IDLE) {
+                    self->HumanAction(priestSN, m_siegeSN);      // ★贴上去转化（胜利动作）
+                    m_convertStartFrame = f;
+                }
+            } else if (priest->NowState == HUMAN_STATE_IDLE) {
+                self->HumanMove(priestSN, tax, tay);             // 还没看到厂 → 跟着推进
+            }
+        } else if (lowBlood) {
+            // 血少 → 退回集结区离敌人最远的那一格
+            const int r = ATK_RALLY_R;
+            const int sx = m_atkRallyX + ((m_atkRallyX < m_atkTargetX) ? -r : r);
+            const int sy = m_atkRallyY + ((m_atkRallyY < m_atkTargetY) ? -r : r);
+            if (priest->NowState == HUMAN_STATE_IDLE)
+                self->HumanMove(priestSN, atkBD(sx), atkBD(sy));
+        } else if (m_atkPhase >= 2) {
+            // 交战期：转化射程内血最厚的敌人（最大化削弱敌人、增强自己）
+            int best = -1;
+            int bestHP = -1;
+            for (const tagArmy& e : info.enemy_armies) {
+                if (e.Blood <= 0) continue;
+                if (e.SN == m_lastConvertedSN) continue;
+                const double d = atkDist(priest->DR, priest->UR, e.DR, e.UR);
+                if (d > DIS_PRIEST * BLOCKSIDELENGTH) continue;
+                if (e.Blood > bestHP) { bestHP = e.Blood; best = e.SN; }
+            }
+            if (best >= 0 && priest->ConvertCooldown <= 0
+                && (m_convertStartFrame < 0 || f - m_convertStartFrame >= 200)) {
+                self->HumanAction(priestSN, best);
+                m_convertStartFrame = f;                    // 同样交给 200 帧保护窗
+            }
+        } else if (priest->NowState == HUMAN_STATE_IDLE) {
+            // 集结期：留在集结区里离敌人最远的一格
+            const int r = ATK_RALLY_R;
+            const int sx = m_atkRallyX + ((m_atkRallyX < m_atkTargetX) ? -r : r);
+            const int sy = m_atkRallyY + ((m_atkRallyY < m_atkTargetY) ? -r : r);
+            if (atkDist(priest->DR, priest->UR, atkBD(sx), atkBD(sy)) > 1.5 * BLOCKSIDELENGTH)
+                self->HumanMove(priestSN, atkBD(sx), atkBD(sy));
+        }
+    }
+
+    // ---------- 6) 诊断（每 300 帧一行，stdout）----------
+    if (f - m_atkDbgFrame >= 300) {
+        m_atkDbgFrame = f;
+        std::cout << "[ATK] f=" << f
+                  << " on=" << m_atkOn
+                  << " phase=" << m_atkPhase
+                  << " army=" << army
+                  << " enemy=" << enemyN
+                  << " siegeSN=" << m_siegeSN
+                  << " target=(" << m_atkTargetX << "," << m_atkTargetY << ")"
+                  << " rally=(" << m_atkRallyX << "," << m_atkRallyY << ")"
+                  << " front=(" << m_atkFrontX << "," << m_atkFrontY << ")"
+                  << " assault=" << m_assaultSN
+                  << " priestHP=" << (priest ? (int)priest->Blood : -1)
+                  << std::endl;
+    }
+}
+
 void UsrAI::processData()
 {
     tagInfo info = getInfo();       // 每帧获取游戏快照
@@ -3039,6 +3415,7 @@ void UsrAI::processData()
     handlePriest(info);             // 祭司：贴塔拉怪/转化（优先于探路）
     scoutWithPriest(info);          // 祭司随机探路（若祭司本帧已避险则不执行）
     scoutWithScout(info);           // 侦察骑兵探路（无战事时，持续到第三波前）
+    attackPhase(this, info);        // 【反攻】集结→推进拉扯→交战→祭司冲锋转化武器工程厂（排在最后，令生效于本帧末）
 
 #if USRAI_DEBUG_LINE
     // ===== 【诊断】每 250 帧（10 秒）打一行状态到调试面板 =====
