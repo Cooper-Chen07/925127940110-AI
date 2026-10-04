@@ -57,9 +57,33 @@ static const int FARM_WOOD_GATE  = 200;  // 开新田的木头门槛：木头 < 
                                          //   （实现用户要求："没食物可采/不能种田 → 先伐木，木头够了再种田"）
 static const int GOLD_FARMERS_FIX = 3;   // 采金固定人数（黄金 ≥300 时降到 2）
 
+// 【用户要求·大象组队】最少 3 人、最多 5 人同一帧一起上（安全优先 ✓）
+static const int ELE_TEAM_MIN = 3;       // 不足 3 人 → 原地等队友（不等就是送死 ✗）
+static const int ELE_TEAM_MAX = 5;       // 上限 5 人：人多 → 大象死得快 → 村民少挨打 ✓
+// 【用户建议·大象留到后期，一次性调用多余伐木工】
+//   ELE_CALL_FRAME：什么时候才开始动用"伐木富余人口"打大象（默认第二波 ≈9 分钟）
+//   ELE_CALL_TEAM ：一次调用几个人（同一帧一起派 ✓ 三人同时开打才安全 ✓）
+static const int ELE_CALL_FRAME = 13500;   // = FRAME_WAVE2（第二波 ≈9 分钟）
+                                         //   注意：这里必须用字面量 ✗ —— FRAME_WAVE2 的
+                                         //   #define 在文件靠后（约 :113），写宏名会编译报错 ✗
+static const int ELE_CALL_TEAM  = 3;
+static int m_eleCallSN = -1;             // 已经为哪头大象调用过伐木工（避免重复调用 ✓）
+// 本帧已经派往这头大象的农民数（每帧清空 ✓）
+//   为什么要它：帧首快照不随本帧派令更新 → 同一帧里所有空闲农民都会看到 c==0
+//   → 会全部被派去同一头大象 ✗（与"多人挤一块农田"同源 ✓）
+static const int HUNT_WAIT_MAX = 600;    // 【用户要求·别站着不动】等队友打猎的最长帧数（24 秒）
+static std::map<int,int> m_huntWaitSince; // 每个农民"从哪一帧开始等队友"（超时就放弃等待 ✓）
+static int m_eleSentSN = -1;             // 本帧正在组队的大象 SN
+static int m_eleSentCount = 0;           // 本帧已派往它的人数
+
 // 【跨模块·探路兵豁免】这两个量 defense / attackPhase 都要用 → 必须声明在它们之前 ✗
 static int m_scoutUnitSN = -1;                 // 当前侦察兵 SN（-1=没有）
 static int m_scoutDone = 0;                    // 1=探路任务结束（成功或放弃）
+
+// 【跨模块·反攻】defense 也要看这两个量（反攻启动后它必须让位 ✓）
+//   原来声明在 :3370（defense 在 :2218）→ defense 看不到 ✗ → 互相抢令 ✗
+static int m_atkOn = 0;                       // 1=反攻已启动
+static int m_atkPhase = 0;                    // 0=集结 1=推进拉扯 2=交战 3=冲锋
 
 static std::set<int> m_farmTaken;                       // 【修复·挤同一块田】本帧已经被派了人的农田 SN
                                                         //   快照 info 是帧首的，派出去的人不会立刻反映进来，
@@ -462,6 +486,11 @@ bool UsrAI::findBuildBlock(const tagInfo& info, int& x, int& y, int w, int h, in
 //   ① 浆果(开局4人，采完自动转) → ② 打猎(高效) → ③ 种田(持续)
 //   木头≈1/4、石头1人、铜器后黄金3人、建房1人
 // ============================================================
+// 【编译修复·前置声明】resSafe 的**定义**在文件靠后（约 :1083），
+//   但 manageVillagers 里"后期调用伐木富余人口打大象"的逻辑（约 :600）要先用它 ✗
+//   → 在这里先声明、后面再定义 ✓（C++ 允许先声明后定义）
+static bool resSafe(const tagInfo& info, const tagResource& r);
+
 void UsrAI::manageVillagers(const tagInfo& info)
 {
     // 1) 统计当前各工种人数（通过工作对象 SN 查类型）
@@ -569,6 +598,49 @@ void UsrAI::manageVillagers(const tagInfo& info)
                      : ((info.Gold >= 300) ? 2 : GOLD_FARMERS_FIX);
         targetFood = total - targetWood - targetGold; // 其余全采食物
         if (targetFood < 6) targetFood = 6;
+    }
+
+    // ===== 【用户建议·大象留到后期，一次性调用多余的伐木工】=====
+    //   ① 后期才做 ② 有安全且活着的大象 ③ 伐木工有富余 ④ 同一帧能凑够 3 人才动手
+    //   注意：这里是**主动把正在伐木的人改派去打猎**（不是等他们空闲 ✗ —— 伐木工永远不空闲）
+    if (bronze && info.GameFrame > ELE_CALL_FRAME) {
+        int eleSN = -1;
+        for (const tagResource& r : info.resources) {
+            if (r.Type != RESOURCE_ELEPHANT || r.Blood <= 0 || r.Cnt <= 0) continue;
+            if (!resSafe(info, r)) continue;         // 只打安全的（离敌营远、离基地不远 ✓）
+            eleSN = r.SN;
+            break;
+        }
+        if (eleSN >= 0 && eleSN != m_eleCallSN) {
+            int woodN = 0;                            // 实际伐木人数
+            int onEle = 0;                            // 已经在这头大象身上的人数
+            int avail = 0;                            // 本帧能派过去的伐木工数
+            for (const tagFarmer& w : info.farmers) {
+                if (w.WorkObjectSN == eleSN
+                    && (w.NowState == HUMAN_STATE_WORKING || w.NowState == HUMAN_STATE_WALKING)) ++onEle;
+                if (!(m_role.count(w.SN) && m_role[w.SN] == 2)) continue;   // 只看伐木工
+                if (w.NowState == HUMAN_STATE_WORKING || w.NowState == HUMAN_STATE_WALKING) ++woodN;
+                if (!m_issued.count(w.SN)
+                    && (w.NowState == HUMAN_STATE_WORKING || w.NowState == HUMAN_STATE_WALKING)) ++avail;
+            }
+            // ③ 富余判定：伐木人数超过目标（targetWood）的部分才算"多余人口" ✓
+            const int surplus = woodN - targetWood;
+            // ④ 同一帧能凑够 ELE_CALL_TEAM 人才动手（不够就等下一帧，绝不零散送死 ✓）
+            if (onEle == 0 && surplus >= ELE_CALL_TEAM && avail >= ELE_CALL_TEAM) {
+                int sent = 0;
+                for (const tagFarmer& w : info.farmers) {
+                    if (sent >= ELE_CALL_TEAM) break;
+                    if (m_issued.count(w.SN)) continue;
+                    if (!(m_role.count(w.SN) && m_role[w.SN] == 2)) continue;
+                    if (w.NowState != HUMAN_STATE_WORKING && w.NowState != HUMAN_STATE_WALKING) continue;
+                    HumanAction(w.SN, eleSN);         // ★同一帧连续 3 条令 → 三人同时开打 ✓
+                    m_issued.insert(w.SN);
+                    m_role[w.SN] = 4;                 // 工种改成打猎（打完可以去种田 ✓）
+                    ++sent;
+                }
+                if (sent >= ELE_CALL_TEAM) m_eleCallSN = eleSN;   // 成队才算调用过 ✓
+            }
+        }
     }
 
     // 3) 逐个给空闲农民分配工作
@@ -856,7 +928,19 @@ void UsrAI::manageVillagers(const tagInfo& info)
             // 【发育策略·关键】想打猎但缺搭档 → 本帧原地不动，等第二个农民生成后一起派
             //   （否则这个农民会落入下面的"砍树"兜底 → 打猎人被拉去伐木、永远凑不成一对）
             // 第二波后不再"等搭档"（猎物本来就少，等不到就是永远站着）→ 直接落到种田分支
-            if (m_huntWaiting && !wave2Farm) continue;
+            // 【用户要求·别站着不动】等队友（配对打猎 / 大象凑 3 人）不能无限等 ✗
+            //   超过 HUNT_WAIT_MAX（24 秒）还等不到 → 放弃等待，落到下面去干别的（种田/伐木 ✓）
+            if (m_huntWaiting && !wave2Farm) {
+                std::map<int,int>::iterator wit = m_huntWaitSince.find(f.SN);
+                if (wit == m_huntWaitSince.end()) {
+                    m_huntWaitSince[f.SN] = info.GameFrame;      // 开始等
+                    continue;
+                }
+                if (info.GameFrame - wit->second < HUNT_WAIT_MAX) continue;   // 还在等
+                m_huntWaitSince.erase(wit);                      // ★等太久 → 不等了，往下走
+            } else {
+                m_huntWaitSince.erase(f.SN);                     // 没在等 → 清记录
+            }
             // 【发育策略】浆果/猎物采完后即可开田（不必等铜器）：市场已建 + 浆果已采完
             //   一片农田一个农民（findNearestFarm 就近派活，农田数量上限=采粮目标数）
             bool marketBuilt = (countBuilding(info, BUILDING_MARKET) > 0);
@@ -999,7 +1083,11 @@ int UsrAI::findNearestFarm(const tagInfo& info, int farmerSN)
 //   注：用平方距离自己算 —— 本助手是文件作用域 static，且调用点可能在 const 函数里，
 //       基类的 calDistance 不是 const 成员，不能在那里用。
 // ============================================================
-static const int RES_SAFE_HOME_DIST  = 38;   // 采集半径（格），可调
+// 【用户要求·安全的资源就去采】原来纯距离一刀切（>38 格就判不安全 ✗）
+//   → 地图上安全的食物/猎物可能就采不到，农民全跑去伐木 ✗
+//   放宽到 60 格，并新增"离可见敌方单位"检查（比只看敌方建筑更准 ✓）
+static const int RES_SAFE_HOME_DIST  = 60;   // 采集半径（格），可调
+static const int RES_SAFE_ENEMY_UNIT_DIST = 12;  // 离可见敌方单位多近算危险（格）
 static const int RES_SAFE_ENEMY_DIST = 14;   // 离已知敌方建筑的安全距离（格），可调
 
 static bool resSafe(const tagInfo& info, const tagResource& r)
@@ -1015,6 +1103,14 @@ static bool resSafe(const tagInfo& info, const tagResource& r)
         const double ey = (double)(r.BlockUR - b.BlockUR);
         if (ex * ex + ey * ey < (double)RES_SAFE_ENEMY_DIST * (double)RES_SAFE_ENEMY_DIST)
             return false;                                // 太靠近敌营
+    }
+    // 【用户要求·安全就去采】新增：离**可见敌方单位**太近也算危险 ✓
+    //   （敌方单位只在当前视野内出现在快照里；看不见时这条不触发 ✓）
+    for (const tagArmy& e : info.enemy_armies) {
+        const double ux = (double)(r.BlockDR - (int)(e.DR / BLOCKSIDELENGTH));
+        const double uy = (double)(r.BlockUR - (int)(e.UR / BLOCKSIDELENGTH));
+        if (ux * ux + uy * uy < (double)RES_SAFE_ENEMY_UNIT_DIST * (double)RES_SAFE_ENEMY_UNIT_DIST)
+            return false;                                // 敌人就在旁边
     }
     return true;
 }
@@ -1075,11 +1171,21 @@ int UsrAI::findNearestHunt(const tagInfo& info, int farmerSN)
             anyElephant = true;
             int c = cnt[sn];
             // 补员规则：c>=4 已够；c==0 且空闲农民不足 3 → 不开新局（人等够了再说）
-            if (c >= 4) continue;
-            if (c == 0 && idleFarmers < 3) continue;
+            if (c >= ELE_TEAM_MAX) continue;      // 上限 4 → 5（人多更安全 ✓）
+            // 【用户要求·三人组队同时打】没人开打且空闲农民不足 3 个 →
+            //   **让他原地等队友**（m_huntWaiting → 调用方本帧不给他派别的活 ✓）
+            //   原来只是 continue ✗ → 他会掉到采尸/伐木分支去砍树 ✗ → 永远凑不齐人 ✗
+            if (c == 0 && idleFarmers < ELE_TEAM_MIN) { m_huntWaiting = true; continue; }
             if (c < eleBestCnt) { eleBestCnt = c; eleBestSn = sn; }
         }
-        if (anyElephant && eleBestSn >= 0) return eleBestSn;
+        if (anyElephant && eleBestSn >= 0) {
+            // 【大象组队】本帧最多派 ELE_TEAM_MAX 个农民上这头大象 → 同一帧一起开打 ✓
+            //   （下限由上面"idleFarmers < ELE_TEAM_MIN 就原地等"保证 ✓）
+            if (m_eleSentSN != eleBestSn) { m_eleSentSN = eleBestSn; m_eleSentCount = 0; }
+            if (m_eleSentCount >= ELE_TEAM_MAX) return -1;   // 本帧已够人 → 不再派
+            m_eleSentCount++;
+            return eleBestSn;
+        }
     }
 
     // ③ 采尸：按体型放宽上限（大象多人采效率高；羚羊2人、狮子1人）
@@ -2116,6 +2222,11 @@ static void priestRetreatLatched(int slot, double ex, double ey, int hx, int hy,
 // ============================================================
 void UsrAI::defense(const tagInfo& info)
 {
+    // 【修复·部队来回乱晃】反攻启动后，部队归 attackPhase 全权指挥 ✓
+    //   否则下面"③ 无战事 → 回塔集结"会把已经走到集结点的兵又叫回家 ✗
+    //   → 兵在家 ↔ 集结点之间无限往返 = "一大堆兵在那乱晃" ✓✓
+    //   反攻期间家里交给箭塔防守 ✓（这就是反攻模块原本的设计意图 ✓）
+    if (m_atkOn) return;
     double range = DIS_ARROWTOWER * BLOCKSIDELENGTH;    // 箭塔攻击距离（细节单位）
 
     // 记录敌人来袭方向（首次发现敌人时，供祭司站位偏移用）
@@ -2945,6 +3056,12 @@ static const int SCOUT_GIVEUP_EXPL = 95;      // 已探明比例(%)达到就放�
 static const int SCOUT_DONE_FRAME  = 99999;   // 到这一帧无论结果都收工（22500→26000，窗口拉长）
 
 static int m_scoutWPI = 0;                     // 当前路点序号
+static int m_scoutLastX = -1, m_scoutLastY = -1;    // 【用户要求】侦察兵最近一次位置（逐帧更新 ✓）
+static int m_scoutDeathX = -1, m_scoutDeathY = -1;  // 【用户要求】侦察兵**首次阵亡**地点（反攻集结点基准 ✓）
+// 【修复·换人不换路】"第几趟"必须跨侦察兵持久 ✗ —— 原来派人时 m_scoutWPI=0，
+//   导致 idx 永远从 0 开始、leg 永远是 0 → 每一任探路兵都走同一个角 ✗
+static int m_scoutLeg = 0;                          // 当前趟次（0,1,2,3…）
+static const int SCOUT_WP_PER_LEG = 8;              // 每趟 8 个路点（与 scoutWaypoint 里 idx/8 一致 ✓）
 static int m_scoutWPX = -1, m_scoutWPY = -1;   // 当前路点（块坐标）
 static int m_scoutWpFrame = -1;                // 进入当前路点的帧（超时用）
 static int m_scoutOrderFrame = -9999;          // 上次下令帧
@@ -3025,19 +3142,49 @@ static void scoutWaypoint(int idx, int& wx, int& wy)
     if (cy < 0) cy = mU / 2;
     int ex = (cx < mL / 2) ? (mL - 12) : 12;      // 敌人一般在自家对角
     int ey = (cy < mU / 2) ? (mU - 12) : 12;
+    // 【用户要求·探路一趟走完没发现敌人就换路】每 8 个路点算"一趟"（leg = idx/8）：
+    //   一趟 = 3 个之字推进点 + 到角 + 4 点绕角扫 → 走完还没看到敌人 → 换下一个角 ✓
+    //   原来 default 分支只在**同一个角**往复扫（idx%4）→ 敌人不在那儿就永远找不到 ✗
+    const int leg = idx / 8;                      // 第几趟（0,1,2,3,…）
+    const int li  = idx % 8;                      // 本趟内的序号
+    {
+        const int farX = (cx < mL / 2) ? (mL - 12) : 12;
+        const int farY = (cy < mU / 2) ? (mU - 12) : 12;
+        const int otherX = (farX == (mL - 12)) ? 12 : (mL - 12);
+        const int otherY = (farY == (mU - 12)) ? 12 : (mU - 12);
+        switch (leg % 4) {                        // ★四角轮换：一趟换一个角
+        case 0:  ex = farX;   ey = farY;   break; // 对角（原来唯一的方向）
+        case 1:  ex = farX;   ey = otherY; break;
+        case 2:  ex = otherX; ey = farY;   break;
+        default: ex = otherX; ey = otherY; break;
+        }
+    }
     if (m_enemyDirX > 0) ex = mL - 12;            // 已见过敌人 → 按实际来袭方向修正
     else if (m_enemyDirX < 0) ex = 12;
     if (m_enemyDirY > 0) ey = mU - 12;
     else if (m_enemyDirY < 0) ey = 12;
+    // ★但若"这一趟"已经走完（leg 递增）说明上一趟没找到 → 允许轮换覆盖上面的方向修正 ✓
+    if (leg > 0) {
+        const int farX2 = (cx < mL / 2) ? (mL - 12) : 12;
+        const int farY2 = (cy < mU / 2) ? (mU - 12) : 12;
+        const int otherX2 = (farX2 == (mL - 12)) ? 12 : (mL - 12);
+        const int otherY2 = (farY2 == (mU - 12)) ? 12 : (mU - 12);
+        switch (leg % 4) {
+        case 1:  ex = farX2;   ey = otherY2; break;
+        case 2:  ex = otherX2; ey = farY2;   break;
+        case 3:  ex = otherX2; ey = otherY2; break;
+        default: break;
+        }
+    }
 
-    switch (idx) {
+    switch (li) {
     case 0:  wx = cx + (ex - cx) / 3;      wy = cy + (ey - cy) / 3;      break;
     case 1:  wx = cx + (ex - cx) * 2 / 3;  wy = cy + (ey - cy) / 3;      break;
     case 2:  wx = cx + (ex - cx) * 2 / 3;  wy = cy + (ey - cy) * 2 / 3;  break;
     case 3:  wx = ex;                      wy = ey;                      break;
     default: {
         const int span = 14;
-        const int k = idx % 4;
+        const int k = li % 4;
         wx = ex + (((ex < mL / 2) ? span : -span) * ((k < 2) ? 1 : 0));
         wy = ey + ((k % 2) ? span : -span);
         break;
@@ -3152,7 +3299,17 @@ static void scoutPhaseS(UsrAI* self, const tagInfo& info)
     if (m_scoutUnitSN >= 0) {
         for (const tagArmy& a : info.armies)
             if (a.SN == m_scoutUnitSN) { me = &a; break; }
+        if (me != nullptr) {              // 【用户要求】逐帧记录位置 → 阵亡那一刻就是死亡地点 ✓
+            m_scoutLastX = (int)(me->DR / BLOCKSIDELENGTH);
+            m_scoutLastY = (int)(me->UR / BLOCKSIDELENGTH);
+        }
         if (me == nullptr) {                  // 阵亡 → 记一次损失，下一帧换人
+            ++m_scoutLeg;                     // 【修复·换人不换路】下一任换下一个角 ✓
+            // 【用户要求·集结点】第一次阵亡 → 记下地点（之后不再改 ✓）
+            if (m_scoutDeathX < 0 && m_scoutLastX >= 0) {
+                m_scoutDeathX = m_scoutLastX;
+                m_scoutDeathY = m_scoutLastY;
+            }
             m_scoutUnitSN = -1;
             ++m_scoutLost;
             return;
@@ -3164,7 +3321,8 @@ static void scoutPhaseS(UsrAI* self, const tagInfo& info)
         const int sn = scoutPick(info);
         if (sn < 0) return;                   // 暂时没有合适的耗材（等新兵）→ 本帧不派
         m_scoutUnitSN = sn;
-        m_scoutWPI = 0;
+        // 【修复·换人不换路】从**当前趟**的第一个路点出发（而不是永远从 0 号点 ✗）
+        m_scoutWPI = m_scoutLeg * SCOUT_WP_PER_LEG;
         scoutWaypoint(m_scoutWPI, m_scoutWPX, m_scoutWPY);
         self->HumanMove(sn, scoutBD(m_scoutWPX), scoutBD(m_scoutWPY));
         m_issued.insert(sn);
@@ -3226,6 +3384,8 @@ static const int ATK_LAST_FRAME   = 27000;   // 兜底线：再不打就等着�
 static const int ATK_LAST_ARMY    = 10;
 static const int ATK_RALLY_BACK   = 4;       // 集结点 = 敌方目标往自家方向退几格
 static const int ATK_RALLY_R      = 2;       // 集结区半径（2 → 5×5，每格一个兵）
+static const int ATK_RALLY_HOME_PULL = 5;    // 【用户要求】集结点=阵亡点再朝大本营拉近几格（10→5）
+static const int ATK_RALLY_WAIT_MAX  = 1500; // 【用户要求】等齐了再上；最多等 60 秒（防一个兵卡住全队 ✗）
 static const int ATK_FRONT_STEP   = 6;       // 推进时全体前压几格（再重新铺开）
 static const int ATK_FRONT_GAP    = 60;      // 两次前压之间至少间隔多少帧
 static const double ATK_RALLY_FRAC = 0.5;    // 集结点 = 自家基地→目标点 连线的这个比例处
@@ -3236,8 +3396,6 @@ static const int ATK_PUSH_FRAME   = 34000;   // 到这一帧无论如何冲锋
 static const int ATK_MAX_ORDER    = 8;       // 每帧最多下这么多条令（省引擎的指令配额）
 static const int ATK_PRIEST_SAFE  = 10;      // 祭司距厂多少格内就贴上去转化
 
-static int m_atkOn = 0;                       // 1=反攻已启动
-static int m_atkPhase = 0;                    // 0=集结 1=推进拉扯 2=交战 3=冲锋
 static int m_atkTargetX = -1, m_atkTargetY = -1;   // 进攻目标点
 static int m_atkRallyX = -1, m_atkRallyY = -1;     // 集结点
 static int m_atkFrontX = -1, m_atkFrontY = -1;     // 当前前压点
@@ -3367,6 +3525,29 @@ static void attackPhase(UsrAI* self, const tagInfo& info)
         m_atkPhaseFrame = f;
         m_assaultSN = -1;
         atkPickPoints(info);
+        // 【用户要求·集结点=探路兵首次阵亡点再靠家一点】
+        //   阵亡点 = 与敌人的接触线 ✓ 比"基地↔敌营中点"更有战术意义
+        //   没死过（探路成功/还没派过）→ 保持 atkPickPoints 算出来的中点 ✓
+        if (m_scoutDeathX >= 0) {
+            int rHx = m_centerX, rHy = m_centerY;
+            if (rHx < 0) rHx = MAP_L / 2;
+            if (rHy < 0) rHy = MAP_U / 2;
+            const double rvx = (double)(rHx - m_scoutDeathX);
+            const double rvy = (double)(rHy - m_scoutDeathY);
+            const double rlen = sqrt(rvx * rvx + rvy * rvy);
+            if (rlen < 1e-6) {
+                m_atkRallyX = m_scoutDeathX; m_atkRallyY = m_scoutDeathY;
+            } else if (rlen > ATK_RALLY_HOME_PULL) {
+                m_atkRallyX = m_scoutDeathX + (int)(rvx / rlen * ATK_RALLY_HOME_PULL + 0.5);
+                m_atkRallyY = m_scoutDeathY + (int)(rvy / rlen * ATK_RALLY_HOME_PULL + 0.5);
+            } else {
+                m_atkRallyX = rHx; m_atkRallyY = rHy;      // 阵亡点已经离家很近 → 就用家
+            }
+            if (m_atkRallyX < 2) m_atkRallyX = 2;
+            if (m_atkRallyX > MAP_L - 3) m_atkRallyX = MAP_L - 3;
+            if (m_atkRallyY < 2) m_atkRallyY = 2;
+            if (m_atkRallyY > MAP_U - 3) m_atkRallyY = MAP_U - 3;
+        }
         if (m_siegeSN >= 0 && m_siegeX >= 0) {             // 已知厂 → 直接冲着厂去
             m_atkTargetX = m_siegeX;
             m_atkTargetY = m_siegeY;
@@ -3379,6 +3560,29 @@ static void attackPhase(UsrAI* self, const tagInfo& info)
         m_atkTargetX = m_siegeX;
         m_atkTargetY = m_siegeY;
         atkPickPoints(info);
+        // 【用户要求·集结点=探路兵首次阵亡点再靠家一点】
+        //   阵亡点 = 与敌人的接触线 ✓ 比"基地↔敌营中点"更有战术意义
+        //   没死过（探路成功/还没派过）→ 保持 atkPickPoints 算出来的中点 ✓
+        if (m_scoutDeathX >= 0) {
+            int rHx = m_centerX, rHy = m_centerY;
+            if (rHx < 0) rHx = MAP_L / 2;
+            if (rHy < 0) rHy = MAP_U / 2;
+            const double rvx = (double)(rHx - m_scoutDeathX);
+            const double rvy = (double)(rHy - m_scoutDeathY);
+            const double rlen = sqrt(rvx * rvx + rvy * rvy);
+            if (rlen < 1e-6) {
+                m_atkRallyX = m_scoutDeathX; m_atkRallyY = m_scoutDeathY;
+            } else if (rlen > ATK_RALLY_HOME_PULL) {
+                m_atkRallyX = m_scoutDeathX + (int)(rvx / rlen * ATK_RALLY_HOME_PULL + 0.5);
+                m_atkRallyY = m_scoutDeathY + (int)(rvy / rlen * ATK_RALLY_HOME_PULL + 0.5);
+            } else {
+                m_atkRallyX = rHx; m_atkRallyY = rHy;      // 阵亡点已经离家很近 → 就用家
+            }
+            if (m_atkRallyX < 2) m_atkRallyX = 2;
+            if (m_atkRallyX > MAP_L - 3) m_atkRallyX = MAP_L - 3;
+            if (m_atkRallyY < 2) m_atkRallyY = 2;
+            if (m_atkRallyY > MAP_U - 3) m_atkRallyY = MAP_U - 3;
+        }
         m_atkTargetX = m_siegeX;
         m_atkTargetY = m_siegeY;
     }
@@ -3396,7 +3600,10 @@ static void attackPhase(UsrAI* self, const tagInfo& info)
             if (atkDist(a.DR, a.UR, atkBD(m_atkRallyX), atkBD(m_atkRallyY))
                 <= 3.0 * BLOCKSIDELENGTH) ++inPlace;
         }
-        if (army > 0 && inPlace * 2 >= army) {
+        // 【用户要求·等齐了再一起反攻】原来"半数到达"就推进 ✗
+        //   → 改成"只剩最后 1 个没到"，或等待超过 ATK_RALLY_WAIT_MAX（防一个兵卡住全队 ✗）
+        if (army > 0 && (inPlace >= army - 1
+                         || f - m_atkPhaseFrame >= ATK_RALLY_WAIT_MAX)) {
             m_atkPhase = 1;
             m_atkPhaseFrame = f;
             atkAdvanceFront(ATK_FRONT_STEP);      // 从集结点先推一格
@@ -3437,7 +3644,6 @@ static void attackPhase(UsrAI* self, const tagInfo& info)
 
     // ---------- 3) 给部队下令（只对空闲单位，每帧有限条）----------
     int ordered = 0;
-    int slot = 0;
     for (const tagArmy& a : info.armies) {
         if (ordered >= ATK_MAX_ORDER) break;
         if (a.Sort == AT_PRIEST || a.Sort == AT_SCOUT) continue;   // 祭司/侦察兵另行处理
@@ -3470,15 +3676,22 @@ static void attackPhase(UsrAI* self, const tagInfo& info)
 
         // ② 没敌人可打 → 走位：
         //    阶段0 铺在集结区；阶段1/2 铺在前压点；阶段3 直接压向目标点
+        // 【修复·格子漂移】格子号改"稳定序号"= 按 SN 比它小的同队单位个数 ✓
+        //   原来用顺序计数器 slot ✗ → 帧间遍历顺序一变，同一个兵就换格子 → 来回走 ✗
+        int mySlot = 0;
+        for (const tagArmy& b : info.armies) {
+            if (b.Sort == AT_PRIEST || b.Sort == AT_SCOUT) continue;
+            if (b.SN == m_scoutUnitSN) continue;
+            if (b.SN < a.SN) ++mySlot;
+        }
         int gx, gy;
         if (m_atkPhase == 0) {
-            atkSlotPos(m_atkRallyX, m_atkRallyY, ATK_RALLY_R, slot, gx, gy);
+            atkSlotPos(m_atkRallyX, m_atkRallyY, ATK_RALLY_R, mySlot, gx, gy);
         } else if (m_atkPhase <= 2) {
-            atkSlotPos(m_atkFrontX, m_atkFrontY, ATK_RALLY_R, slot, gx, gy);
+            atkSlotPos(m_atkFrontX, m_atkFrontY, ATK_RALLY_R, mySlot, gx, gy);
         } else {
-            atkSlotPos(m_atkTargetX, m_atkTargetY, ATK_RALLY_R + 1, slot, gx, gy);
+            atkSlotPos(m_atkTargetX, m_atkTargetY, ATK_RALLY_R + 1, mySlot, gx, gy);
         }
-        ++slot;
         if (atkDist(a.DR, a.UR, atkBD(gx), atkBD(gy)) <= 1.2 * BLOCKSIDELENGTH) continue;  // 到位就别再下令
         self->HumanMove(a.SN, atkBD(gx), atkBD(gy));
         ++ordered;
@@ -3625,6 +3838,8 @@ void UsrAI::processData()
     tagInfo info = getInfo();       // 每帧获取游戏快照
     m_issued.clear();               // 清空本帧已下令记录
     m_farmTaken.clear();            // 【修复·挤同一块田】本帧农田占用记录也要清
+    m_eleSentSN = -1;               // 【大象组队】本帧组队计数清零
+    m_eleSentCount = 0;
 
     // 记录市镇中心坐标（找地/回家参照），首次找到后缓存
     if (m_centerX < 0) {
