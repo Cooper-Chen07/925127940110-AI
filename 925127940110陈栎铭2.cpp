@@ -962,13 +962,20 @@ void UsrAI::manageVillagers(const tagInfo& info)
         // 【发育策略】浆果最多 6 人（开局 4 人 + 新生成的 2 人去采果），之后新农民转打猎/采集
         int berryCap = ((int)info.farmers.size() <= 8) ? 4 : 6;
         if (berryExists && berryCnt < berryCap) {
-            int bestSn = -1;
-            int bestCnt = 1e9;
-            for (const tagResource& r : info.resources) {
-                if (r.Type != RESOURCE_BUSH || r.Cnt <= 0) continue;
-                int c = targetCount[r.SN];
-                if (c < bestCnt) { bestCnt = c; bestSn = r.SN; }
-            }
+              // 【经济#4·子智能体引擎级分析】食物吞吐 ∝ 1/(500+2×距离格×16) ✓
+              //   3格=0.0177/帧、20格=0.0088、40格=0.0056 → **差 3 倍** ✗
+              //   而且食物**没有任何科技加成**（Development.cpp:253-299 只有木/石/金分支 ✓）
+              //   原来这里只按"已派人数"选 ✗ → 农民会被派到几十格外的浆果堆按 1/3 效率采 ✓
+              //   评分 = 已派人数×8格 + 实际距离 ✓（近的优先；一个已用人 ≈ 8 格距离 ✓）
+              int bestSn = -1;
+              double bestScore = 1e18;
+              for (const tagResource& r : info.resources) {
+                  if (r.Type != RESOURCE_BUSH || r.Cnt <= 0) continue;
+                  if (!resSafe(info, r)) continue;                 // 顺带排除敌营旁的浆果 ✓
+                  double d = calDistance(f.DR, f.UR, r.DR, r.UR);
+                  double sc = (double)targetCount[r.SN] * 8.0 * BLOCKSIDELENGTH + d;
+                  if (sc < bestScore) { bestScore = sc; bestSn = r.SN; }
+              }
             if (bestSn >= 0) {
                 HumanAction(f.SN, bestSn);
                 m_issued.insert(f.SN);
@@ -1251,8 +1258,12 @@ int UsrAI::findNearestHunt(const tagInfo& info, int farmerSN)
 
     // ① 优先羚羊/狮子（安全猎物）：两两一组，猎人最少的优先
     //    （大象不在这一轮——羚羊没打完就不打大象）
-    int safeBestSn = -1;
-    int safeBestCnt = 1e9;
+      int safeBestSn = -1;
+      int safeBestCnt = 1e9;
+      // 【经济#4】猎物也加距离权重（原来只看猎人数量 ✗）
+      double safeBestScore = 1e18;
+      const double cxB = (double)((m_centerX >= 0) ? m_centerX : MAP_L / 2) * BLOCKSIDELENGTH;
+      const double cyB = (double)((m_centerY >= 0) ? m_centerY : MAP_U / 2) * BLOCKSIDELENGTH;
     for (int sn : alives) {
         const tagResource* rr = nullptr;
         for (const tagResource& r : info.resources)
@@ -1263,8 +1274,14 @@ int UsrAI::findNearestHunt(const tagInfo& info, int farmerSN)
         if (c >= MAX_HUNTER_PER_PREY) continue;           // 已满员 → 换下一只
         // 【发育策略】打猎要两人同去：缺搭档时标记"等待"，由调用方让该农民原地不动
         //   （等第二个农民生成后，两人同一帧一起被派去打同一只猎物）
-        if (c == 0 && idleFarmers < 2) { m_huntWaiting = true; continue; }
-        if (c < safeBestCnt) { safeBestCnt = c; safeBestSn = sn; }
+          // 【经济#4/#6·文档 24 行】"一个村民打一个羚羊也行" ✓
+          //   原来要求"同时有 2 个 IDLE 农民"✗ → 几乎永远凑不齐 → 罚站最多 24 秒 ✗
+          //   现在只在食物还充足(≥150)时才等搭档 ✓（食物紧张就单人去打 ✓）
+          if (c == 0 && idleFarmers < 2 && (int)info.Meat >= 150) { m_huntWaiting = true; continue; }
+          // 【经济#4】评分 = 猎人人数×20格 + 到基地距离 ✓（近的猎物优先 ✓）
+          double dPrey = calDistance(cxB, cyB, rr->DR, rr->UR);
+          double scPrey = (double)c * 20.0 * BLOCKSIDELENGTH + dPrey;
+          if (scPrey < safeBestScore) { safeBestScore = scPrey; safeBestSn = sn; safeBestCnt = c; }
     }
     if (safeBestSn >= 0) return safeBestSn;
 
