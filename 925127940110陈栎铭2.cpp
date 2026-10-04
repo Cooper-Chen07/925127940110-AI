@@ -4346,12 +4346,23 @@ static void attackPhase(UsrAI* self, const tagInfo& info)
 //   而敌方远程(战车弓/复合弓)射程 7 格 ✗ → 他正好站在射程内挨打 ✓（实测 hp100→19 ✗）
 //   且敌兵对祭司是**硬锁**（只有打死才换目标 ✗）→ 撤退没用 ✓ 只能拉开距离 ✓
 //   → 改成后方 **12 格**（7+5 安全余量 ✓）；hp<60% 时上面的 lowBlood 分支会继续把他拉回集结区 ✓
-const int fx = m_atkFrontX + ((m_atkFrontX < m_atkTargetX) ? -12 : 12);
-const int fy = m_atkFrontY + ((m_atkFrontY < m_atkTargetY) ? -12 : 12);
+// [FIX priest-stays-home] measured [EVENT] PRIEST_LOST f=14411 (9:36): during the attack the
+//   priest has NO positioning logic at all (handlePriest also returns early when m_atkOn),
+//   and this branch walked him to "12 cells behind the front" -- the front is OUT in the
+//   field toward the enemy, so he stood in the open and got burst down (100->0 in ~12s).
+//   Before we know where the factory is (siegeSN<0) there is NO reason for him to leave:
+//   keep him back at our own base (behind the towers). He only goes out in phase 3.
+int wx, wy;
+if (m_siegeSN < 0 && m_centerX >= 0 && m_centerY >= 0) {
+    wx = atkBD(m_centerX); wy = atkBD(m_centerY);      // 厂未知 -> 老实待在家里
+} else {
+    wx = atkBD(m_atkFrontX + ((m_atkFrontX < m_atkTargetX) ? -12 : 12));
+    wy = atkBD(m_atkFrontY + ((m_atkFrontY < m_atkTargetY) ? -12 : 12));
+}
                 if (priest->NowState == HUMAN_STATE_IDLE
-                    && atkDist(priest->DR, priest->UR, atkBD(fx), atkBD(fy))
+                    && atkDist(priest->DR, priest->UR, wx, wy)
                        > 3.0 * BLOCKSIDELENGTH) {
-                    self->HumanMove(priestSN, atkBD(fx), atkBD(fy));
+                    self->HumanMove(priestSN, wx, wy);
                 }
             }
         } else if (priest->NowState == HUMAN_STATE_IDLE) {
