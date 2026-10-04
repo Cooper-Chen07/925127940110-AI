@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <vector>
 #include <map>
+#include <fstream>   // 【诊断】AI 自己写 ai_log.txt（stdout 在本地 GUI 下抓不到 ✗）
 
 using namespace std;
 
@@ -247,6 +248,9 @@ void UsrAI::scoutWithPriest(const tagInfo& info)
         if (a.Sort == AT_PRIEST) { priestSN = a.SN; priest = &a; break; }
     }
     if (priest == nullptr) return;                  // 祭司不存在（死亡=游戏失败）
+    // ★round2#3 反攻期间祭司全权交给 attackPhase（与 defense/handlePriest 的让位一致）
+    //   否则他会把在厂门口施法的祭司 HumanMove 回家 → suspendRelation → 转化作废 ✗
+    if (m_atkOn) return;
     if (m_issued.count(priestSN)) return;           // 本帧已被其他模块下令（如避险撤退）
 
     // 1.5) 【修复·反复移动】场上有敌人（第一波开打/波次残兵）时祭司不探路：
@@ -629,8 +633,10 @@ void UsrAI::manageVillagers(const tagInfo& info)
     int targetWood = 3;                         // 开局 3 伐木（策略指定）
     // 【发育策略】木材不够就派 1~2 人帮忙伐木（3 → 4 → 5，最多 5 人）
     //   原逻辑只在"升级建筑尚未建成"时加人 → 铜器后木头不够不会加人，与策略不符
-    if (info.Wood < 150) targetWood = 4;        // 木头不足：加 1 人
-    if (info.Wood < 60) targetWood = 5;         // 严重不足：再加 1 人
+    // 【ai_log 实证】f=6011 时木头只有 55 ✗ → 升级链（市场+兵营+靶场=425 木）彻底卡住 ✓
+    //   文档 71 行也说"木材会成为瓶颈，怎么都不太够" → 前期伐木上限 5 → 8 ✓
+    if (info.Wood < 150) targetWood = 6;        // 木头不足：6 人
+    if (info.Wood < 80)  targetWood = 8;        // 严重不足：8 人
     // 【发育策略】不派挖石工：初始 150 石正好建 1 座塔（塔上限 1 座），人力全给食物/木头/黄金
     int targetStone = 0;
     // 【3.0.7g 调整】金矿 200→400（翻倍）→ 黄金更充裕，挖金保持 3 人
@@ -640,11 +646,13 @@ void UsrAI::manageVillagers(const tagInfo& info)
     //   → 按升级进度"陆续"派人去采金：0 人 → 1 → 2 → 3 人；升完铜器后固定 3 人。
     int targetGold = 3;
     if (info.civilizationStage < CIVILIZATION_BRONZEAGE) {
-        if (m_bronzeUpgradeFrame < 0) {
-            targetGold = 0;                        // 还没开始升级 → 一个都不去采金
-        } else {
+        // 【策略文档 71 行·早期采金】"安排村民早点采集黄金，免得技术升好了没资源造兵"
+        //   原来升级前 0 人采金 ✗ → ai_log 实证 f=5411 黄金仍是 0 ✗
+        //   而复合弓兵要 20 金/个 ✗ → 没金 = 造不出兵 ✓
+        if ((int)info.farmers.size() >= 10) targetGold = 2;
+        if (m_bronzeUpgradeFrame >= 0) {
             int elapsed = info.GameFrame - m_bronzeUpgradeFrame;
-            targetGold = 1 + elapsed / 500;        // 每 20 秒加 1 人（升级总时长 60 秒）
+            targetGold = 2 + elapsed / 500;        // 升级中再陆续加人（每 20 秒 +1）
             if (targetGold > 3) targetGold = 3;
         }
     }
@@ -1581,17 +1589,20 @@ void UsrAI::buildBuildings(const tagInfo& info)
         //   现在：住房阶梯 4/6/8 不变；**8 座达成后一口气补到 12 座**（≈50 人口，到上限）。
         //   注意只在靶场已建后才补，避免抢在"市场/兵营/靶场"这条升级关键链之前。
         int homes = countBuilding(info, BUILDING_HOME);
-        int houseTarget = (countBuilding(info, BUILDING_RANGE) > 0) ? 6 : 4;
         bool bronzeNow2 = (info.civilizationStage >= CIVILIZATION_BRONZEAGE);
-        if (bronzeNow2 && countBuilding(info, BUILDING_RANGE) > 0) houseTarget = 8;
+        // 【ai_log 实证·头号死锁】原来造房目标被绑在"靶场已建"上 ✗：
+        //   靶场要 市场+兵营+靶场 = 425 木 ✗，木头不够 → 靶场永远建不出
+        //   → 人口永远 20 → trainArmy 首行直接 return → **兵永远 0** ✗✗（f=6011: pop20/20 army0）
+        //   现在与靶场**解耦**，改成按人口需求（文档要求 50 人口 ≈ 12 座房 ✓）：
+        int houseTarget = bronzeNow2 ? 12 : 6;                 // 非铜器 6 座(24 人口)，铜器后 12 座(48 人口)
+        if ((int)info.Human_Num >= (int)info.Human_MaxNum - 2) houseTarget += 2;   // 人口告急 → 紧急补房 ✓
+        if (houseTarget > 12) houseTarget = 12;
         // 【用户要求】原来的 4/6/8 阶梯逻辑**不动**；8 座达成后**不等人口告急**，
         //   直接把目标抬到 12 → 一口气从 8 座建到 12 座（≈50 人口，正好到上限）。
         //   原来这里是"人口≥上限-2 就把目标设为 现有房数+1"，每次只加 1 座、还得等人口再满
         //   —— 现在按"房≥8"直接触发，不再依赖人口。
-        int houseNormalTarget = houseTarget;      // 正常目标(4/6/8)，供马厩当"住房已完成"的前提
-        if (bronzeNow2 && countBuilding(info, BUILDING_RANGE) > 0 && homes >= 8) {
-            houseTarget = 12;
-        }
+        // 【马厩前提】保持低门槛（4/6 座），不要因为"要建 12 座"把马厩一直拖住 ✗
+        int houseNormalTarget = bronzeNow2 ? 6 : 4;
         // 【农田不再由专职建造者负责】原来这里算 farmWant（第二波后按食物采集人数扩田）。
         //   现在农田全部由食物系农民自己建，本函数里的两处农田分支都已删除 → 不再需要它。
 
@@ -1763,6 +1774,27 @@ void UsrAI::buildBuildings(const tagInfo& info)
         // 【已删除·用户要求】原链里的"农田"。农田一律由食物系农民自己建。
         // 【已上移·用户要求】原 15 号位的"金矿旁仓库"已提到优先级 3。
         // （羚羊堆仓库/浆果堆谷仓由采集者负责，见 buildResourceDepots）
+        // ===== 【策略文档·超级快速】靶场只建 1 个 → 出兵太慢 ✗ =====
+        //   文档(71行)："理想情况下 8 分多一点就可以两个靶场同时出兵，10 分钟前 3 个靶场同时出兵"
+        //   3 个靶场 = 每分钟约 6 个复合弓 ✓ —— 这是"边打边造、越打越强"的前提 ✓
+        //   放在主链**之后**：优先级低于"升级必需链"，但木头够就补 ✓（留 60 木给别的用途 ✓）
+        // round2#8 【修复·靶场建不出】科技不再是硬前置：第二波(13500)之后即便科技还没发起，
+        //   也允许建第 2/3 座靶场（文档 71 行："8 分多一点两个靶场同时出兵"）
+        if (!built && (m_researchCount[BUILDING_RANGE_UPGRADE_COMPOSITE_BOW] > 0
+                       || info.GameFrame >= FRAME_WAVE2)
+            && countBuilding(info, BUILDING_RANGE) > 0
+            && countBuilding(info, BUILDING_RANGE) < 3
+            && info.Wood >= BUILD_RANGE_WOOD + 60) {
+            int x, y;
+            bool found = false;
+            if (towerBX >= 0) found = findBuildBlock(info, x, y, 3, 3, towerBX, towerBY);
+            if (!found) found = findBuildBlock(info, x, y, 3, 3);
+            if (found) {
+                HumanBuild(builder, BUILDING_RANGE, x, y);
+                m_issued.insert(builder);
+                built = true;
+            }
+        }
         if (!built) return;  // 无可建建筑 → 本帧结束（绝不抽调其他农民帮忙）
     }
 }
@@ -3377,7 +3409,7 @@ static void scoutPhaseS(UsrAI* self, const tagInfo& info)
         m_enemyBaseY = sumY / bldCnt;
     }
     if (bldCnt > m_scoutBldSeen) m_scoutBldSeen = bldCnt;
-    if (m_scoutBldSeen >= 2) {                // 条件B：≥2 个敌方建筑 → 已定位主营 → 收工
+    if (m_scoutBldSeen >= 4) {                // round2#7b 阈值 2→4（看到两座房子就收工太早 ✗）
         m_scoutDone = 1;
         if (m_scoutDoneWhy == 0) m_scoutDoneWhy = 2;
     }
@@ -3413,14 +3445,30 @@ static void scoutPhaseS(UsrAI* self, const tagInfo& info)
                         .arg(m_scoutBldSeen).arg(m_scoutLost).arg(m_scoutExplPct));
     }
     // 任务已结束 → 本模块不再下令；该兵不再进 m_issued → 自动回归 defense 管理
-    if (m_scoutDone) return;
+    if (m_scoutDone) {
+        // ★round2#1 必须清零：否则 attackPhase 的 atkArmyCount 把他算进 army ✓
+        //   但下令循环又排除他 ✗ → inPlace >= army / atFront >= army 永远为假
+        //   → 集结只能等超时、**前压点永远不动**（反攻卡到 34000 帧）✗✗
+        m_scoutUnitSN = -1;
+        return;
+    }
 
     // ---------- 3) 门没开 → 完全不动（前期一行不执行）----------
     if (f < SCOUT_START_FRAME) return;
-    // 【用户要求·等第二波打完再探】场上只要有**可见敌人**（敌方单位或敌方农民）就不出发 ✓
-    //   否则探路兵跑出去会把第二/三波的进攻部队提前点亮、引来 ✗
-    //   ——"第二波进攻结束"就以"看不到敌人了"为准 ✓（简单、不用额外计时器 ✓）
-    if (!info.enemy_armies.empty() || !info.enemy_farmers.empty()) return;
+    // round2#7 【修复·探路兵永远派不出去】原来"场上一个可见敌人都不能有"过于苛刻 ✗
+    //   → 改成"敌人不在基地附近(30 格)就允许出发"✓（远方的敌方单位/农民不再挡住探路 ✓）
+    {
+        const int hcx = (m_centerX >= 0) ? m_centerX : MAP_L / 2;
+        const int hcy = (m_centerY >= 0) ? m_centerY : MAP_U / 2;
+        const double NEARHOME = 30.0;
+        bool nearHome = false;
+        for (const tagArmy& e : info.enemy_armies)
+            if (scoutDist(e.BlockDR, e.BlockUR, hcx, hcy) <= NEARHOME) { nearHome = true; break; }
+        if (!nearHome)
+            for (const tagFarmer& e : info.enemy_farmers)
+                if (scoutDist(e.BlockDR, e.BlockUR, hcx, hcy) <= NEARHOME) { nearHome = true; break; }
+        if (nearHome) return;                 // 敌人已贴到家门口 → 不派探路兵
+    }
     if (scoutArmyCount(info) < SCOUT_MIN_ARMY) return;
 
     // ---------- 4) 侦察兵存活检查 ----------
@@ -3526,6 +3574,10 @@ static const int ATK_PUSH_FRAME   = 34000;   // 到这一帧无论如何冲锋
 static const int ATK_MAX_ORDER    = 8;       // 每帧最多下这么多条令（省引擎的指令配额）
 static const int ATK_PRIEST_SAFE  = 10;      // 祭司距厂多少格内就贴上去转化
 static const int ATK_ABORT_ARMY   = 6;       // 【修复·兵不够还硬冲】反攻中兵力低于这个数 → 撤销反攻 ✓
+// 【策略文档·早集结早开战】文档(75行)："第二波防御一过就集结，集结 10 个左右复合弓就可以开战，
+//   差不多是 11 分钟多点" → 主要触发线 = 兵力 ≥ 10 且 帧 ≥ 16500(11:00) ✓
+static const int ATK_BOW_ARMY     = 10;      // 早开战兵力门槛（≈10 个复合弓 ✓）
+static const int ATK_BOW_FRAME    = 16500;   // 早开战时间门槛（11:00 ✓ 第二波之后 ✓）
 static const int ATK_CHARGE_MAXEN = 8;       // 【修复·被围还冲锋】敌人多于这个数 → 冲锋降级为阶段2走位 ✓
 static const int ATK_FRONT_CLEAR  = 12;      // 【用户要求·一层层拉出来打】前方这么多格内有敌人 → 原地打完再推进 ✓
 
@@ -3656,7 +3708,10 @@ static void attackPhase(UsrAI* self, const tagInfo& info)
 
     // ---------- 1) 触发（三档）----------
     if (!m_atkOn) {
-        if (m_siegeSN < 0 && m_enemyBaseX < 0) return;     // 还不知道敌方在哪 → 继续等探路
+        // round2#6 【修复·永远不反攻】原来"没见过敌方建筑"就永不启动 ✗
+        //   atkPickPoints 本来就有"厂→敌建筑群中心→地图对角"的降级链 ✓
+        //   → 给探路一个截止线：22500 帧后不再等情报 ✓
+        if (m_siegeSN < 0 && m_enemyBaseX < 0 && f < ATK_MAIN_FRAME) return;
         const bool okEarly = (f >= ATK_EARLY_FRAME && army >= ATK_EARLY_ARMY);
         const bool okMain  = (f >= ATK_MAIN_FRAME && army >= ATK_MAIN_ARMY
                               && (priest == nullptr
@@ -3667,9 +3722,11 @@ static void attackPhase(UsrAI* self, const tagInfo& info)
         //   原来的 okEarly/okMain（按时间猜）不再作为启动条件 ✓
         //   但保留 okLast（27000 帧 + 10 兵）作为**超时兜底** ✓：人口一直满不了也不会干等判负 ✓
         const bool okFull  = (info.Human_Num >= info.Human_MaxNum);
+        // 【策略文档】早开战线：兵力够 + 时间到（第二波过后）→ 立刻集结开打 ✓
+        const bool okBows  = (army >= ATK_BOW_ARMY && f >= ATK_BOW_FRAME);
         (void)okEarly;                       // 保留计算，仅不再作为条件（避免"未使用变量"警告 ✓）
         (void)okMain;
-        if (!(okFull || okLast)) return;
+        if (!(okBows || okFull || okLast)) return;      // ★早开战线优先（文档 75 行 ✓）
         m_atkOn = 1;
         m_atkPhase = 0;
         m_atkPhaseFrame = f;
@@ -3776,13 +3833,20 @@ static void attackPhase(UsrAI* self, const tagInfo& info)
         //      改成"**整体到齐**"（只剩最后 1 个没到）✓
         //   ② 前方 ATK_FRONT_CLEAR(12) 格内还有敌人 → **不推进** ✓
         //      → 部队停在前压点，让突击者/远程把这一层逐个拉出来打完，再整体往前走 ✓
+        // round2#2 【修复·推不动】原来"前方 12 格必须无敌人"是**无条件**的 ✗
+        //   但敌营(31兵5塔)附近前方必然有敌人 → 前压点一步都推不动 ✗
+        //   → 只在"离目标还远"时才要求前方清空（一层层拉出来打 ✓ 文档48-50行）
         bool frontClear = true;
-        for (const tagArmy& fe : info.enemy_armies) {
-            if (fe.Blood <= 0) continue;
-            if (atkDist(fe.DR, fe.UR, atkBD(m_atkFrontX), atkBD(m_atkFrontY))
-                <= ATK_FRONT_CLEAR * BLOCKSIDELENGTH) { frontClear = false; break; }
+        if (frontToTarget > 25.0 * BLOCKSIDELENGTH) {
+            for (const tagArmy& fe : info.enemy_armies) {
+                if (fe.Blood <= 0) continue;
+                if (atkDist(fe.DR, fe.UR, atkBD(m_atkFrontX), atkBD(m_atkFrontY))
+                    <= ATK_FRONT_CLEAR * BLOCKSIDELENGTH) { frontClear = false; break; }
+            }
         }
-        if (army > 0 && atFront >= army            // 【用户要求】推进也要求**全员到齐**（原来 army-1 ✓）
+        // round2#2b 【修复·无兜底】原来 atFront>=army 恒假就永远不推进（没有任何超时出口）✗
+        const bool frontStalled = (f - m_atkPhaseFrame >= ATK_RALLY_WAIT_MAX);   // 60 秒没推进 → 强制前压
+        if (army > 0 && (atFront >= army || frontStalled)
             && frontClear
             && f - m_atkPhaseFrame >= ATK_FRONT_GAP
             && frontToTarget > 10.0 * BLOCKSIDELENGTH) {
@@ -3850,7 +3914,12 @@ static void attackPhase(UsrAI* self, const tagInfo& info)
         }
         int gx, gy;
         // 【修复·被围还冲锋】敌人太多时，"冲锋阶段"按**阶段2**走位 ✓（照常打身边的敌人 ✓）
-        const int effPhase = (m_atkPhase >= 3 && enemyN > ATK_CHARGE_MAXEN) ? 2 : m_atkPhase;
+        // round2#5 【修复·祭司孤军】祭司已在冲锋(阶段3)且有厂目标时，军队必须一起压上替他吸引火力
+        //   （文档 65 行："不满血或箭塔密集，要靠军队吸引火力"）
+        //   否则整队被降级留守、祭司一个人死在 5 座塔下 = 判负 ✗
+        const bool priestCharging = (priest != nullptr && m_atkPhase >= 3 && m_siegeSN >= 0);
+        const int effPhase = (m_atkPhase >= 3 && enemyN > ATK_CHARGE_MAXEN && !priestCharging)
+                             ? 2 : m_atkPhase;
         if (effPhase == 0) {
             atkSlotPos(m_atkRallyX, m_atkRallyY, ATK_RALLY_R, mySlot, gx, gy);
         } else if (effPhase <= 2) {
@@ -3928,12 +3997,16 @@ static void attackPhase(UsrAI* self, const tagInfo& info)
                 //   否则重置转化关系 → 永远转不完。
                 if (castWindow) {
                     // 正在施法（200 帧保护窗）→ 本帧完全不碰祭司 ✓
-                } else if (dS > ATK_PRIEST_SAFE * BLOCKSIDELENGTH) {
-                    if (priest->NowState == HUMAN_STATE_IDLE)
-                        self->HumanMove(priestSN, atkBD(m_siegeX), atkBD(m_siegeY));
-                } else if (canCast && priest->NowState == HUMAN_STATE_IDLE) {
-                    self->HumanAction(priestSN, m_siegeSN);      // ★贴上去转化（只有冷却好了才发 ✓）
-                    m_convertStartFrame = f;
+                } else if (dS <= DIS_PRIEST * BLOCKSIDELENGTH) {
+                    // ★round2#4 进入转化射程(12格)就交给引擎自己的 Attacking 关系走过去：
+                    //   它的 Move 阶段会一直压到"贴邻"(≈1.83格)才施法（引擎核实 ✓）
+                    //   这里**绝不能再下 HumanMove** —— 那会 suspendRelation → 2~6 秒施法计时整个作废 ✗
+                    if (canCast) {
+                        self->HumanAction(priestSN, m_siegeSN);  // ★唯一的取胜调用 ✓
+                        m_convertStartFrame = f;
+                    }
+                } else if (priest->NowState == HUMAN_STATE_IDLE) {
+                    self->HumanMove(priestSN, atkBD(m_siegeX), atkBD(m_siegeY));
                 }
             } else if (priest->NowState == HUMAN_STATE_IDLE) {
                 self->HumanMove(priestSN, tax, tay);             // 还没看到厂 → 跟着推进
@@ -4006,6 +4079,15 @@ static void attackPhase(UsrAI* self, const tagInfo& info)
     }
 }
 
+
+// ===== 【诊断·文件日志】把一行写进 ai_log.txt（相对游戏工作目录 ✓ 追加 ✓ 失败也不影响逻辑 ✓）=====
+//   为什么要它：本地跑 GUI 版时 stdout 抓不到（重定向会让引擎崩 ✗），
+//   而引擎的 GameLog.log 会把 AI 的消息和 manageOrder 警告粘在一起、吞掉数值 ✗
+static void aiLogLine(const QString& s)
+{
+    std::ofstream ofs("ai_log.txt", std::ios::app);
+    if (ofs.is_open()) { ofs << s.toStdString(); ofs << "\n"; }
+}
 void UsrAI::processData()
 {
     tagInfo info = getInfo();       // 每帧获取游戏快照
@@ -4049,6 +4131,77 @@ void UsrAI::processData()
     scoutWithPriest(info);          // 祭司随机探路（若祭司本帧已避险则不执行）
     scoutWithScout(info);           // 侦察骑兵探路（无战事时，持续到第三波前）
     attackPhase(this, info);        // 【反攻】集结→推进拉扯→交战→祭司冲锋转化武器工程厂（排在最后，令生效于本帧末）
+
+    // ===== 【纯日志诊断】每 300 帧(12 秒)一行 + 关键事件（写 ai_log.txt 与 stdout 双通道 ✓）=====
+    {
+        static int m_stateLogFrame = -9999;
+        static int m_lastPriestAlive = -1;
+        static int m_lastCenterCnt = -1;
+        static bool m_winLogged = false;
+        if (info.GameFrame - m_stateLogFrame >= 300) {
+            m_stateLogFrame = info.GameFrame;
+            int farmerCnt = 0, armyCnt = 0;
+            int priestHP = -1, priestCd = -1, priestIdle = -1;
+            for (const tagFarmer& f : info.farmers)
+                if (f.FarmerSort == FARMERTYPE_FARMER) ++farmerCnt;
+            for (const tagArmy& a : info.armies) {
+                if (a.Sort == AT_PRIEST) {
+                    priestHP = (int)a.Blood; priestCd = (int)a.ConvertCooldown;
+                    priestIdle = (a.NowState == HUMAN_STATE_IDLE) ? 1 : 0;
+                    continue;
+                }
+                if (a.Sort == AT_SCOUT) continue;
+                ++armyCnt;
+            }
+            const int centerCnt = countBuilding(info, BUILDING_CENTER);
+            const int towerCnt  = countBuilding(info, BUILDING_ARROWTOWER);
+            const int rangeCnt  = countBuilding(info, BUILDING_RANGE);
+            const int farmCnt   = countBuilding(info, BUILDING_FARM);
+            QString line = QString("[STATE] f=%1 | res F%2 W%3 G%4 S%5 | pop %6/%7 | farmers %8 army %9 | age %10")
+                           .arg(info.GameFrame).arg(info.Meat).arg(info.Wood).arg(info.Gold)
+                           .arg(info.Stone).arg((int)info.Human_Num).arg((int)info.Human_MaxNum)
+                           .arg(farmerCnt).arg(armyCnt).arg((int)info.civilizationStage);
+            line += QString(" | bld2 Mkt%1 Bks%2 Stb%3 Coll%4 Grn%5")
+                    .arg(countBuilding(info, BUILDING_MARKET))
+                    .arg(countBuilding(info, BUILDING_ARMYCAMP))
+                    .arg(countBuilding(info, BUILDING_STABLE))
+                    .arg(countBuilding(info, BUILDING_COLLAGE))
+                    .arg(countBuilding(info, BUILDING_GRANARY));
+            line += QString(" | bld C%1 T%2 R%3 Fm%4 | scout done%5 unit%6 lost%7 bld%8 expl%9 siegeSN%10")                    .arg(m_scoutDone).arg(m_scoutUnitSN).arg(m_scoutLost)
+                    .arg(m_scoutBldSeen).arg(m_scoutExplPct).arg(m_siegeSN);
+            line += QString(" | atk on%1 ph%2 rally %3,%4 tgt %5,%6")
+                    .arg(m_atkOn).arg(m_atkPhase).arg(m_atkRallyX).arg(m_atkRallyY)
+                    .arg(m_atkTargetX).arg(m_atkTargetY);
+            line += QString(" | priest hp%1 cd%2 idle%3")
+                    .arg(priestHP).arg(priestCd).arg(priestIdle);
+            std::cout << line.toStdString() << std::endl;
+            aiLogLine(line);
+            if (priestHP < 0 && m_lastPriestAlive != 0) {
+                std::cout << "[EVENT] PRIEST_LOST f=" << info.GameFrame << std::endl;
+                aiLogLine(QString("[EVENT] PRIEST_LOST f=%1").arg(info.GameFrame));
+            }
+            m_lastPriestAlive = (priestHP >= 0) ? 1 : 0;
+            if (centerCnt == 0 && m_lastCenterCnt != 0) {
+                std::cout << "[EVENT] CENTER_LOST f=" << info.GameFrame << std::endl;
+                aiLogLine(QString("[EVENT] CENTER_LOST f=%1").arg(info.GameFrame));
+            }
+            m_lastCenterCnt = centerCnt;
+        }
+        // 胜利检测：武器工程厂出现在**我方建筑列表**里 = 已被祭司转化 ✓
+        //   （tagBuilding 快照没有 isConverted()/isDie() ✗；但 info.buildings 已按归属分好 ✓）
+        if (!m_winLogged) {
+            for (const tagBuilding& b : info.buildings) {
+                if (b.Type == BUILDING_SIEGE) {
+                    std::cout << "[EVENT] WIN_FACTORY_CONVERTED f=" << info.GameFrame
+                              << " sn=" << b.SN << std::endl;
+                    aiLogLine(QString("[EVENT] WIN_FACTORY_CONVERTED f=%1 sn=%2")
+                              .arg(info.GameFrame).arg(b.SN));
+                    m_winLogged = true;
+                    break;
+                }
+            }
+        }
+    }
 
 #if USRAI_DEBUG_LINE
     // ===== 【诊断】每 250 帧（10 秒）打一行状态到调试面板 =====
