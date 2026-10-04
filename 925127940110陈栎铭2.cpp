@@ -3455,6 +3455,32 @@ static void scoutWaypoint(int idx, int& wx, int& wy)
     if (wy > mU - 3) wy = mU - 3;
 }
 
+// ============================================================
+// 【结构性修复·胜利路径的唯一入口】武器工程厂探测（每帧都跑 ✓）
+//   原来 `m_siegeSN = b.SN;` 只在 scoutPhaseS 内部 ✗，而 scoutPhaseS 在 m_scoutDone 后
+//   直接 return ✗ → 探路兵一收工/放弃，厂坐标就再也不会更新 ✗✗
+//   → 大军后来亲眼看到厂也拿不到 SN → 永远赢不了 ✗（取胜必须用 SN 发 HumanAction ✓）
+//   现在提到公共位置：processData 每帧调一次 ✓
+// ============================================================
+static void detectEnemyKeyBuildings(const tagInfo& info)
+{
+    int sumX = 0, sumY = 0, bldCnt = 0;
+    for (const tagBuilding& b : info.enemy_buildings) {
+        if (b.Percent < 100) continue;          // 未建成的建筑引擎转不了 ✓ 不计
+        sumX += b.BlockDR; sumY += b.BlockUR; ++bldCnt;
+        if (b.Type == BUILDING_SIEGE && m_siegeSN < 0) {
+            m_siegeSN = b.SN;
+            m_siegeX = b.BlockDR;
+            m_siegeY = b.BlockUR;
+            std::cout << "[SIEGE] f=" << info.GameFrame << " 看到武器工程厂 SN=" << b.SN
+                      << " at (" << b.BlockDR << "," << b.BlockUR << ")" << std::endl;
+            // 注：aiLogLine 在文件后部定义 ✗ 这里不能调用（不加新前置声明）
+            //     stdout 的 [SIEGE] 行 + [STATE] 里的 siegeSN 字段已足够定位 ✓
+        }
+    }
+    if (bldCnt > 0) { m_enemyBaseX = sumX / bldCnt; m_enemyBaseY = sumY / bldCnt; }
+}
+
 static void scoutPhaseS(UsrAI* self, const tagInfo& info)
 {
     const int f = info.GameFrame;
@@ -4253,6 +4279,7 @@ void UsrAI::processData()
     }
 
     updateMap(info);                // 建立地图 + 收集已探明空地
+    detectEnemyKeyBuildings(info);  // 【结构性修复】每帧认一次敌方的武器工程厂/建筑群中心 ✓
     buildBuildings(info);           // 基地建筑：住房→箭塔→兵营→市场→靶场→马厩→学院→农田（专职建造者）
     buildResourceDepots(info);      // 资源点仓库/谷仓：采集者负责（羚羊堆/浆果堆）
     manageCenter(info);             // 市镇中心：升级铜器（优先）→ 生产农民到 20
