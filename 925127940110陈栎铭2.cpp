@@ -3187,7 +3187,11 @@ void UsrAI::handlePriest(const tagInfo& info)
             if (e.Blood <= 0) continue;
             if (e.SN == m_lastConvertedSN) continue;
             const bool hittingMe = (e.WorkObjectSN == meSN);
-            const bool pk = (e.Sort == AT_CHARIOT_ARCHER || e.Sort == AT_COMPOSITE_BOWMAN);
+            // [FIX siege-counter] 投石车射程 10 > 箭塔 8 也 > 弓兵 5 -> 塔和兵都够不着它，
+            //   实测 14:24-14:36 祭司 2 秒掉 36 血(18dps) 并拆掉一座塔。
+            //   唯一射程够的是祭司自己(DIS_PRIEST=12 > 10) -> 把它加进背水一战目标 ✓
+            const bool pk = (e.Sort == AT_CHARIOT_ARCHER || e.Sort == AT_COMPOSITE_BOWMAN
+                             || e.Sort == AT_STONE_THROWER);
             if (!hittingMe && !pk) continue;
             double d = calDistance(priest->DR, priest->UR, e.DR, e.UR);
             if (d > DIS_PRIEST * BLOCKSIDELENGTH) continue;
