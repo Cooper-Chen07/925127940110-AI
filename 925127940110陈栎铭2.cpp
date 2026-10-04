@@ -1768,7 +1768,7 @@ void UsrAI::buildBuildings(const tagInfo& info)
         //   优先块放在住房之前 → 不被"人口临界补房"挡住（这也是马厩/学院曾经被挡死的原因）。
         //   顺序：谷仓(120木) → 箭塔科技(50食) → 箭塔(150石)。
         if (!built && countBuilding(info, BUILDING_RANGE) > 0
-            && countBuilding(info, BUILDING_ARROWTOWER) < 2
+            && countBuilding(info, BUILDING_ARROWTOWER) < 4   /* [FIX towers] doc: 箭塔轮番进攻 -- measured 9:24-10:24 priest 90->34 while army dropped to 0 (escorts killed) with only T1/T2 (3 dmg/shot) -> raise cap 2 -> 4 */
             && info.Stone >= BUILD_ARROWTOWER_STONE) {
             if (m_researchCount[BUILDING_GRANARY_ARROWTOWER] > 0) {
                 // 科技已好 → 在第一座箭塔旁边建第二座（交叉火力）
@@ -2060,7 +2060,7 @@ void UsrAI::researchTech(const tagInfo& info)
             // 【用户要求·建完靶场立刻补第二座塔】必须研发箭塔科技（引擎硬前置：Development.cpp:768）
             //   只在"真要建塔"时才花这 50 食：靶场已建 + 塔不足 2 座 + 石头够一座塔(150)
             if (countBuilding(info, BUILDING_RANGE) > 0
-                && countBuilding(info, BUILDING_ARROWTOWER) < 2
+                && countBuilding(info, BUILDING_ARROWTOWER) < 4   /* [FIX towers] doc: 箭塔轮番进攻 -- measured 9:24-10:24 priest 90->34 while army dropped to 0 (escorts killed) with only T1/T2 (3 dmg/shot) -> raise cap 2 -> 4 */
                 && info.Stone >= BUILD_ARROWTOWER_STONE
                 && m_researchCount[BUILDING_GRANARY_ARROWTOWER] == 0
                 && info.Meat >= BUILDING_GRANARY_ARROWTOWER_FOOD) {
