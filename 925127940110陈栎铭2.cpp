@@ -3869,7 +3869,7 @@ static void attackPhase(UsrAI* self, const tagInfo& info)
         // round2#6 【修复·永远不反攻】原来"没见过敌方建筑"就永不启动 ✗
         //   atkPickPoints 本来就有"厂→敌建筑群中心→地图对角"的降级链 ✓
         //   → 给探路一个截止线：22500 帧后不再等情报 ✓
-        if (m_siegeSN < 0 && m_enemyBaseX < 0 && f < ATK_MAIN_FRAME) return;
+        if (m_siegeSN < 0 && m_enemyBaseX < 0 && f < ATK_BOW_FRAME) return;   // 【实测修复·最后拦路石】原来等到 22500(15:00) ✗ 而实测 10:48 兵已 6、bld0（没探到任何敌建筑）→ 反攻被这道情报门永久挡住 ✗✗ 改成到 14000(9:20) 就盲推 ✓（atkPickPoints 会选地图对角 ✓ 每帧探厂会在路上抓到 ✓）
         const bool okEarly = (f >= ATK_EARLY_FRAME && army >= ATK_EARLY_ARMY);
         const bool okMain  = (f >= ATK_MAIN_FRAME && army >= ATK_MAIN_ARMY
                               && (priest == nullptr
