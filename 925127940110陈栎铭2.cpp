@@ -3720,10 +3720,10 @@ static const double ATK_RALLY_FRAC = 0.5;    // 集结点 = 自家基地→目�
                                              //   （0.5=中点；越小越靠家=越安全；原来等于"贴着敌营" ✗）
 static const int ATK_NEAR_ENEMY   = 8;       // 兵身边多少格内有敌人 → 直接打它
 static const int ATK_ASSAULT_NEAR = 6;       // 突击者多少格内有敌人 → 撤回初始位置
-static const int ATK_PUSH_FRAME   = 34000;   // 到这一帧无论如何冲锋
+static const int ATK_PUSH_FRAME   = 28000;   // 【修复】34000(22:40)→28000(18:40)：45000 帧判负，原来只剩 7.3 分钟冲厂 ✗（文档说战斗就要 2-3 分钟 ✓）   // 到这一帧无论如何冲锋
 static const int ATK_MAX_ORDER    = 8;       // 每帧最多下这么多条令（省引擎的指令配额）
 static const int ATK_PRIEST_SAFE  = 10;      // 祭司距厂多少格内就贴上去转化
-static const int ATK_ABORT_ARMY   = 6;       // 【修复·兵不够还硬冲】反攻中兵力低于这个数 → 撤销反攻 ✓
+static const int ATK_ABORT_ARMY   = 3;       // 【修复】6→3：开战线是 8 兵，原来损失 3 个就撤销整个反攻 ✗ → 反复抖动到不了敌营 ✓       // 【修复·兵不够还硬冲】反攻中兵力低于这个数 → 撤销反攻 ✓
 // 【策略文档·早集结早开战】文档(75行)："第二波防御一过就集结，集结 10 个左右复合弓就可以开战，
 //   差不多是 11 分钟多点" → 主要触发线 = 兵力 ≥ 10 且 帧 ≥ 16500(11:00) ✓
 static const int ATK_BOW_ARMY     = 8;       // 【调优】10→8：文档说"10 个左右"✓ 实测常卡在 7-8 → 反攻永不触发 ✗（30 分钟上限下早开战才有时间冲厂 ✓）      // 早开战兵力门槛（≈10 个复合弓 ✓）
