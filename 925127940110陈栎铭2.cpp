@@ -4494,6 +4494,25 @@ void UsrAI::processData()
                     .arg(centerCnt).arg(towerCnt).arg(rangeCnt).arg(farmCnt)   // ★修复：上次替换把这 4 个 .arg 弄丢 → 参数错位 4 位
                     .arg(m_scoutDone).arg(m_scoutUnitSN).arg(m_scoutLost)
                     .arg(m_scoutBldSeen).arg(m_scoutExplPct).arg(m_siegeSN);
+            // [DIAG whoHitsPriest] 数清楚：几个敌人正打祭司 / 我方几个兵正锁定那些敌人
+            int diagAtkOnPriest = 0, diagArmyOnThem = 0, diagEnemyN = (int)info.enemy_armies.size();
+            {
+                int psn = -1;
+                for (const tagArmy& a : info.armies)
+                    if (a.Sort == AT_PRIEST) { psn = a.SN; break; }
+                if (psn >= 0) {
+                    for (const tagArmy& e : info.enemy_armies)
+                        if (e.Blood > 0 && e.WorkObjectSN == psn) ++diagAtkOnPriest;
+                    for (const tagArmy& a : info.armies) {
+                        if (a.Sort == AT_PRIEST || a.Sort == AT_SCOUT) continue;
+                        if (a.WorkObjectSN <= 0) continue;
+                        for (const tagArmy& e : info.enemy_armies)
+                            if (e.SN == a.WorkObjectSN && e.Blood > 0 && e.WorkObjectSN == psn) { ++diagArmyOnThem; break; }
+                    }
+                }
+            }
+            line += QString(" | DIAG whoHitsPriest%1 armyOnThem%2 enemyN%3")
+                    .arg(diagAtkOnPriest).arg(diagArmyOnThem).arg(diagEnemyN);
             line += QString(" | atk on%1 ph%2 rally %3,%4 tgt %5,%6")
                     .arg(m_atkOn).arg(m_atkPhase).arg(m_atkRallyX).arg(m_atkRallyY)
                     .arg(m_atkTargetX).arg(m_atkTargetY);
