@@ -1562,8 +1562,12 @@ void UsrAI::manageCenter(const tagInfo& info)
         if (!upgradeBuildingReady
             && (!bronzeNow || needGoldFarmers)
             && (int)info.farmers.size() < farmerTarget
-            && info.Human_Num < info.Human_MaxNum
-            && info.Meat >= BUILDING_CENTER_CREATEFARMER_FOOD) {
+            // [FIX food-reserve] food is eaten by farmers (50 each) so army never grows,
+            //   priest ends up with no escort and dies to wave2/3 (measured hp2).
+            //   after 8:00, if bowmen < 3 -> stop making farmers, keep food for cheap bowmen (40 food each).
+            && !(info.GameFrame >= 8000 && countArmy(info, AT_BOWMAN) + countArmy(info, AT_COMPOSITE_BOWMAN) < 3)
+&& info.Human_Num < info.Human_MaxNum
+&& info.Meat >= BUILDING_CENTER_CREATEFARMER_FOOD) {
             BuildingAction(b.SN, BUILDING_CENTER_CREATEFARMER);
             m_issued.insert(b.SN);
             return;     // 本帧中心只做一件事
@@ -3729,7 +3733,9 @@ static const int ATK_ASSAULT_NEAR = 6;       // 突击者多少格内有敌人 �
 static const int ATK_PUSH_FRAME   = 28000;   // 【修复】34000(22:40)→28000(18:40)：45000 帧判负，原来只剩 7.3 分钟冲厂 ✗（文档说战斗就要 2-3 分钟 ✓）   // 到这一帧无论如何冲锋
 static const int ATK_MAX_ORDER    = 8;       // 每帧最多下这么多条令（省引擎的指令配额）
 static const int ATK_PRIEST_SAFE  = 10;      // 祭司距厂多少格内就贴上去转化
-static const int ATK_ABORT_ARMY   = 3;       // 【修复】6→3：开战线是 8 兵，原来损失 3 个就撤销整个反攻 ✗ → 反复抖动到不了敌营 ✓       // 【修复·兵不够还硬冲】反攻中兵力低于这个数 → 撤销反攻 ✓
+static const int ATK_ABORT_ARMY   = 2;   // [FIX hysteresis] start needs >=3 but abort was also <3 ->
+                                              //   measured: army oscillates 2~5, attack flapped on/off (f=15311 atk=0 with army=2)
+                                              //   -> abort only below 2, so the push persists once started       // 【修复】6→3：开战线是 8 兵，原来损失 3 个就撤销整个反攻 ✗ → 反复抖动到不了敌营 ✓       // 【修复·兵不够还硬冲】反攻中兵力低于这个数 → 撤销反攻 ✓
 // 【策略文档·早集结早开战】文档(75行)："第二波防御一过就集结，集结 10 个左右复合弓就可以开战，
 //   差不多是 11 分钟多点" → 主要触发线 = 兵力 ≥ 10 且 帧 ≥ 16500(11:00) ✓
 static const int ATK_BOW_ARMY     = 3;       // 【实测】5→3：实测兵力被波次反复打掉、长期在 3~4 震荡 ✗ 够不到 5 → 反攻永不启动 ✗✗ 而不反攻=必然超时判负 ✗ → 3 兵也上（有农民肉盾+拆塔+祭司保命 ✓）       // 【实测】8→5：实测兵力长期在 4~6 震荡（波次消耗+食物紧张）✗ 够不到 8 → 反攻永不启动 ✗✗ → 15:36 仍 atk on0 ✓ 降到 5 ✓（另有农民肉盾+拆塔+祭司保命 ✓，小部队突袭仍可行 ✓）       // 【调优】10→8：文档说"10 个左右"✓ 实测常卡在 7-8 → 反攻永不触发 ✗（30 分钟上限下早开战才有时间冲厂 ✓）      // 早开战兵力门槛（≈10 个复合弓 ✓）
