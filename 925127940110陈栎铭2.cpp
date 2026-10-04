@@ -85,6 +85,7 @@ static int m_scoutDone = 0;                    // 1=探路任务结束（成功�
 //   原来声明在 :3370（defense 在 :2218）→ defense 看不到 ✗ → 互相抢令 ✗
 static int m_atkOn = 0;                       // 1=反攻已启动
 static int m_atkHoldUntil = 0;                // [FIX hold-off] 撤销反攻后的冷却截止帧（防止每帧重新触发导致部队来回跑）
+static int m_atkCornerIdx = 0;                // [FIX sweep] 找不到厂时轮换搜索的角（0=敌人来向，1~3=其余角）
 static int m_atkPhase = 0;                    // 0=集结 1=推进拉扯 2=交战 3=冲锋
 // 【修复·防御集结重复下令】记录每个兵上次被叫回集结点的帧（90 帧节流 ✓）
 static std::map<int,int> m_homeRecallFrame;
@@ -3852,8 +3853,14 @@ static void atkPickPoints(const tagInfo& info)
         //   实测：随机地图里敌人不一定在对角 → 军队冲向 (90,10) 整局 bld0（一座敌建筑都没看到）✗✗
         //   而 m_enemyDirX/Y 已在 defense(:2421) 按**第一波来袭敌人的真实坐标**记录过 ✓ 最可靠 ✓
         if (m_enemyDirX != 0 || m_enemyDirY != 0) {
-            m_atkTargetX = (m_enemyDirX > 0) ? (mL - 10) : ((m_enemyDirX < 0) ? 10 : cx);
-            m_atkTargetY = (m_enemyDirY > 0) ? (mU - 10) : ((m_enemyDirY < 0) ? 10 : cy);
+            // [FIX sweep] 角标轮换：0=敌人真实来向(最优) 1/2/3=其余三个角
+            int sdx = m_enemyDirX, sdy = m_enemyDirY;
+            const int sidx = m_atkCornerIdx & 3;
+            if (sidx == 1) sdy = -sdy;
+            else if (sidx == 2) { sdx = -sdx; sdy = -sdy; }
+            else if (sidx == 3) sdx = -sdx;
+            m_atkTargetX = (sdx > 0) ? (mL - 10) : ((sdx < 0) ? 10 : cx);
+            m_atkTargetY = (sdy > 0) ? (mU - 10) : ((sdy < 0) ? 10 : cy);
         } else {
             m_atkTargetX = (cx < mL / 2) ? (mL - 10) : 10;
             m_atkTargetY = (cy < mU / 2) ? (mU - 10) : 10;
@@ -3963,6 +3970,13 @@ static void attackPhase(UsrAI* self, const tagInfo& info)
         }
     }
 
+    // [FIX sweep] 已在推但 2000 帧还找不到厂 → 换下一个角搜索（4 角轮换）
+    if (m_atkOn && m_siegeSN < 0 && m_atkPhase >= 2 && f - m_atkPhaseFrame > 2000) {
+        m_atkCornerIdx = (m_atkCornerIdx + 1) & 3;
+        atkPickPoints(info);        // 换角后重选目标与集结点
+        m_atkPhaseFrame = f;
+        m_atkPhase = 0;             // 回到集结，重新推进
+    }
     // ---------- 1) 触发（三档）----------
     if (!m_atkOn) {
         // round2#6 【修复·永远不反攻】原来"没见过敌方建筑"就永不启动 ✗
