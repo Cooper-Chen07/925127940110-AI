@@ -3726,7 +3726,7 @@ static const int ATK_PRIEST_SAFE  = 10;      // 祭司距厂多少格内就贴�
 static const int ATK_ABORT_ARMY   = 6;       // 【修复·兵不够还硬冲】反攻中兵力低于这个数 → 撤销反攻 ✓
 // 【策略文档·早集结早开战】文档(75行)："第二波防御一过就集结，集结 10 个左右复合弓就可以开战，
 //   差不多是 11 分钟多点" → 主要触发线 = 兵力 ≥ 10 且 帧 ≥ 16500(11:00) ✓
-static const int ATK_BOW_ARMY     = 10;      // 早开战兵力门槛（≈10 个复合弓 ✓）
+static const int ATK_BOW_ARMY     = 8;       // 【调优】10→8：文档说"10 个左右"✓ 实测常卡在 7-8 → 反攻永不触发 ✗（30 分钟上限下早开战才有时间冲厂 ✓）      // 早开战兵力门槛（≈10 个复合弓 ✓）
 static const int ATK_BOW_FRAME    = 16500;   // 早开战时间门槛（11:00 ✓ 第二波之后 ✓）
 // 【文档 77 行·最后的冲锋】农民肉盾节流计时器
 static int m_farmerRushFrame = -99999;
@@ -4052,6 +4052,28 @@ static void attackPhase(UsrAI* self, const tagInfo& info)
             self->HumanAction(a.SN, target);
             ++ordered;
             continue;
+        }
+
+        // ①.5 【文档 65 行·拆塔开路】阶段3 且已拿到厂坐标 → 没敌人可打的空闲部队去拆
+        //     "厂 12 格内的箭塔" ✓（文档原话："或者干脆拆掉两三个再进去"）
+        //     原因：祭司冲厂时 5 座箭塔全在打他 ✗（100 血扛不住几轮 ✓）
+        //     ★只打 BUILDING_ARROWTOWER ✓ **绝不碰 BUILDING_SIEGE**（打掉厂就永远赢不了 ✗）
+        if (target < 0 && m_atkPhase >= 3 && m_siegeSN >= 0 && m_siegeX >= 0) {
+            int towerBest = -1;
+            double towerD = 1e18;
+            for (const tagBuilding& tb : info.enemy_buildings) {
+                if (tb.Type != BUILDING_ARROWTOWER) continue;      // ★绝不碰武器工程厂 ✓
+                if (tb.Percent < 100) continue;
+                if (atkDist((double)tb.BlockDR, (double)tb.BlockUR, atkBD(m_siegeX), atkBD(m_siegeY))
+                    > 12.0 * BLOCKSIDELENGTH) continue;             // 只拆"厂附近"的塔 ✓
+                const double d = atkDist(a.DR, a.UR, tb.BlockDR, tb.BlockUR);
+                if (d < towerD) { towerD = d; towerBest = tb.SN; }
+            }
+            if (towerBest >= 0 && towerD <= 20.0 * BLOCKSIDELENGTH) {
+                self->HumanAction(a.SN, towerBest);
+                ++ordered;
+                continue;
+            }
         }
 
         // ② 没敌人可打 → 走位：
