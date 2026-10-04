@@ -2434,7 +2434,26 @@ void UsrAI::defense(const tagInfo& info)
     //   否则下面"③ 无战事 → 回塔集结"会把已经走到集结点的兵又叫回家 ✗
     //   → 兵在家 ↔ 集结点之间无限往返 = "一大堆兵在那乱晃" ✓✓
     //   反攻期间家里交给箭塔防守 ✓（这就是反攻模块原本的设计意图 ✓）
-    if (m_atkOn) return;
+    // [FIX emergency-recall] measured: f=14411(9:36) atk on1 with army=6, yet priest hp14 -> dead.
+    //   Reason: once m_atkOn=1 this whole function returned here, so during the attack
+    //   (a) towers stopped prioritising the enemy that is killing the priest,
+    //   (b) the "save the priest by re-targeting" logic was dead code, and
+    //   (c) the army marched to the enemy corner leaving the priest alone.
+    //   Now: during the attack, if the priest is hurt (<75%) or being attacked -> run defense
+    //   as usual, so the army comes back and the towers switch fire.
+    if (m_atkOn) {
+        const tagArmy* pr = nullptr;                      // 本函数后面的 priest 变量此处还没声明，自己找
+        for (const tagArmy& a : info.armies)
+            if (a.Sort == AT_PRIEST) { pr = &a; break; }
+        bool priestHurt = false;
+        if (pr != nullptr) {
+            if (pr->Blood < pr->MaxBlood * 3 / 4) priestHurt = true;
+            else
+                for (const tagArmy& e : info.enemy_armies)
+                    if (e.Blood > 0 && e.WorkObjectSN == pr->SN) { priestHurt = true; break; }
+        }
+        if (!priestHurt) return;
+    }
     double range = DIS_ARROWTOWER * BLOCKSIDELENGTH;    // 箭塔攻击距离（细节单位）
 
     // 记录敌人来袭方向（首次发现敌人时，供祭司站位偏移用）
