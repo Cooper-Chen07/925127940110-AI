@@ -4031,8 +4031,10 @@ static void attackPhase(UsrAI* self, const tagInfo& info)
             if (go) { m_atkPhase = 2; m_atkPhaseFrame = f; }
         }
     }
-    if (m_atkPhase < 3 && (enemyN <= 4 || f >= ATK_PUSH_FRAME)) {
-        m_atkPhase = 3;                      // 大势已去 / 拖太久 → 冲锋
+    if (m_atkPhase < 3 && ((enemyN <= 4 && m_siegeSN >= 0) || f >= ATK_PUSH_FRAME)) {
+        m_atkPhase = 3;   // 【实测修复·祭司盲冲致死】原来 enemyN<=4 就冲锋 ✗ —— 而波次间隙敌人常 ≤4 →
+                      //   反攻一启动就进 ph3 → 祭司**还不知道厂在哪**(siegeSN-1)就冲进敌营 → 被塔+守军打死 ✓
+                      //   现在：提前冲锋必须**已拿到厂坐标** ✓ 否则等 ATK_PUSH_FRAME(28000) ✓
         m_atkPhaseFrame = f;
     }
 
