@@ -3150,6 +3150,26 @@ void UsrAI::handlePriest(const tagInfo& info)
     //   → 直接选"射程内(DIS_PRIEST=12)最近的敌人"，**投石车优先**（文档："投石车…可以
     //   最后处理，打掉或者转来自己用"）。
     //   ★前期不动：要求 frame > FRAME_WAVE2，第一波及之前行为完全不变。
+        // [FIX last-stand] measured: priest hp 98 -> 71 -> 49 -> dead, taking ~2.8 hp/s from the
+    //   hard-locked chariot archers (they outrange our bowmen: DIS_BOWMAN=5 vs their 7).
+    //   ALL fallback conversion branches above require Blood >= 60%, so once below 60% the
+    //   priest could not fight back at all and simply died.
+    //   Conversion range DIS_PRIEST=12 > their 7, and a successful conversion DELETES the
+    //   attacker -- so below 60% hp, convert whoever is hitting us (or the priest-killers).
+    if (target < 0 && priest->Blood < priest->MaxBlood * 3 / 5) {
+        const int meSN = priest->SN;
+        double bestLS = 1e18;
+        for (const tagArmy& e : info.enemy_armies) {
+            if (e.Blood <= 0) continue;
+            if (e.SN == m_lastConvertedSN) continue;
+            const bool hittingMe = (e.WorkObjectSN == meSN);
+            const bool pk = (e.Sort == AT_CHARIOT_ARCHER || e.Sort == AT_COMPOSITE_BOWMAN);
+            if (!hittingMe && !pk) continue;
+            double d = calDistance(priest->DR, priest->UR, e.DR, e.UR);
+            if (d > DIS_PRIEST * BLOCKSIDELENGTH) continue;
+            if (d < bestLS) { bestLS = d; target = e.SN; }
+        }
+    }
     if (target < 0 && info.GameFrame > FRAME_WAVE2
         && (int)info.enemy_armies.size() <= 6
         && priest->ConvertCooldown <= 0
