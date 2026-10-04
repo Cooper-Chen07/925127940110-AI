@@ -4511,8 +4511,24 @@ void UsrAI::processData()
                     }
                 }
             }
-            line += QString(" | DIAG whoHitsPriest%1 armyOnThem%2 enemyN%3")
-                    .arg(diagAtkOnPriest).arg(diagArmyOnThem).arg(diagEnemyN);
+            // [DIAG2] 伤害来源到底在哪：数"离祭司 12 格内的敌方单位/农民/建筑"
+            int diagNearA = 0, diagNearF = 0, diagNearB = 0, diagEB = (int)info.enemy_buildings.size();
+            double diagPX = -1, diagPY = -1;
+            {
+                for (const tagArmy& a : info.armies)
+                    if (a.Sort == AT_PRIEST) { diagPX = a.DR; diagPY = a.UR; break; }
+                if (diagPX >= 0) {
+                    const double R = 12.0 * BLOCKSIDELENGTH;
+                    for (const tagArmy& e : info.enemy_armies)
+                        if (e.Blood > 0 && calDistance(diagPX, diagPY, e.DR, e.UR) <= R) ++diagNearA;
+                    for (const tagFarmer& e : info.enemy_farmers)
+                        if (calDistance(diagPX, diagPY, e.DR, e.UR) <= R) ++diagNearF;
+                    for (const tagBuilding& e : info.enemy_buildings)
+                        if (calDistance(diagPX, diagPY, (double)e.BlockDR * BLOCKSIDELENGTH, (double)e.BlockUR * BLOCKSIDELENGTH) <= R) ++diagNearB;
+                }
+            }
+            line += QString(" | DIAG2 nearA%1 nearF%2 nearBld%3 enemyBld%4")
+                    .arg(diagNearA).arg(diagNearF).arg(diagNearB).arg(diagEB);
             line += QString(" | atk on%1 ph%2 rally %3,%4 tgt %5,%6")
                     .arg(m_atkOn).arg(m_atkPhase).arg(m_atkRallyX).arg(m_atkRallyY)
                     .arg(m_atkTargetX).arg(m_atkTargetY);
