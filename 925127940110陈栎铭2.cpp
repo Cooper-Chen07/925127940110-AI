@@ -2406,11 +2406,19 @@ void UsrAI::defense(const tagInfo& info)
 
         // 射程内选目标：满血（未标记）优先，其次掉血的
         int fullTarget = -1, weakTarget = -1;
+        int lockPriestTarget = -1;      // 【防御②】正在打祭司的敌人（最高优先）
+        double bestLockD = 1e18;
         double bestFullD = 1e18, bestFullPriest = 1e18;
         double bestWeakD = 1e18, bestWeakPriest = 1e18;
         for (const tagArmy& e : info.enemy_armies) {
+            if (e.Blood <= 0) continue;                     // 【防御②】死人不选（防快照残留）
             double dt = calDistance(towerDR, towerUR, e.DR, e.UR);
             if (dt > range) continue;
+            // 【防御②】引擎事实：敌兵锁死祭司后只有自己被打死才换目标 ✗
+            //   ⇒ 最高优先 = 把"正锁定祭司"的敌人打死（这是唯一能救祭司的操作 ✓）
+            if (priest != nullptr && e.WorkObjectSN == priest->SN && dt < bestLockD) {
+                bestLockD = dt; lockPriestTarget = e.SN;
+            }
             double dp = (priest != nullptr) ? calDistance(priest->DR, priest->UR, e.DR, e.UR) : 1e18;
             if (e.Blood >= e.MaxBlood) {                        // 满血 = 未标记 → 拉仇恨
                 bool better = false;
@@ -2426,7 +2434,8 @@ void UsrAI::defense(const tagInfo& info)
                 if (better) { weakTarget = e.SN; bestWeakPriest = dp; bestWeakD = dt; }
             }
         }
-        int target = (fullTarget >= 0) ? fullTarget : weakTarget;
+        int target = (lockPriestTarget >= 0) ? lockPriestTarget
+                                             : ((fullTarget >= 0) ? fullTarget : weakTarget);
         if (target < 0) continue;
 
         // 判断塔当前攻击目标是否已掉血（被命中过）
@@ -2443,17 +2452,26 @@ void UsrAI::defense(const tagInfo& info)
             m_issued.insert(b.SN);
             m_towerSwitch[b.SN] = info.GameFrame;
         } else if (curHit) {
-            // 已命中当前目标（掉血）→ 切换射程内"下一个角色"（排除当前目标）
-            // 逐个点名范围内敌人，不限满血（满血优先，其次掉血）
-            int nextTarget = -1;
-            if (fullTarget >= 0 && fullTarget != b.Project) nextTarget = fullTarget;
-            else if (weakTarget >= 0 && weakTarget != b.Project) nextTarget = weakTarget;
-            if (nextTarget >= 0) {
-                auto it = m_towerSwitch.find(b.SN);
-                if (it == m_towerSwitch.end() || info.GameFrame - it->second >= 30) {
-                    HumanAction(b.SN, nextTarget);
-                    m_issued.insert(b.SN);
-                    m_towerSwitch[b.SN] = info.GameFrame;
+            // 【防御⑥·文档 L31 后半句】若有敌人正锁定本塔（WorkObjectSN == 塔 SN）✓
+            //   说明"拉怪"已成功 ✓ → 此时**不该切换**，应当集火把当前目标打死 ✓
+            //   （引擎事实：敌兵锁死后只有自己被打死才换目标 ✗ → 换目标 = 伤害摊薄、谁也打不死 ✗）
+            bool someoneOnMe = false;
+            for (const tagArmy& e : info.enemy_armies) {
+                if (e.Blood <= 0) continue;
+                if (e.WorkObjectSN == b.SN) { someoneOnMe = true; break; }
+            }
+            if (!someoneOnMe) {
+                // 已命中当前目标（掉血）→ 切换射程内"下一个角色"（排除当前目标）
+                int nextTarget = -1;
+                if (fullTarget >= 0 && fullTarget != b.Project) nextTarget = fullTarget;
+                else if (weakTarget >= 0 && weakTarget != b.Project) nextTarget = weakTarget;
+                if (nextTarget >= 0) {
+                    auto it = m_towerSwitch.find(b.SN);
+                    if (it == m_towerSwitch.end() || info.GameFrame - it->second >= 30) {
+                        HumanAction(b.SN, nextTarget);
+                        m_issued.insert(b.SN);
+                        m_towerSwitch[b.SN] = info.GameFrame;
+                    }
                 }
             }
         }
@@ -2615,7 +2633,10 @@ void UsrAI::defense(const tagInfo& info)
             // ③ 没有远程目标 → 只打**贴到 6 格内**的敌人（6 < 箭塔射程 7 ✓）
             //   远处的近战交给箭塔，小兵不追 ✗（避免白白送人头 ✓）
             if (target < 0) {
-                double best = 6.0 * BLOCKSIDELENGTH;
+                // 【防御①】原来只有 6 格，而敌方远程射程 7 ✗ → 敌人站在 6~10 格打祭司时
+                //   我方兵**站着不动** ✗✗（文档 L35 要求主动打远程保护祭司 ✓）
+                //   放宽到 11 格（仍受 DEFEND_R=22 迎击圈约束 ✓ 不跨全图 ✓）
+                double best = 11.0 * BLOCKSIDELENGTH;
                 for (const tagArmy& e : info.enemy_armies) {
                     const double d = calDistance(a.DR, a.UR, e.DR, e.UR);
                     if (d < best) { best = d; target = e.SN; }
@@ -2776,11 +2797,16 @@ void UsrAI::handlePriest(const tagInfo& info)
         if (nearTowerD < 1e17 && nearTowerD > PRIEST_LEASH * BLOCKSIDELENGTH) {
             int lhx, lhy;
             getPriestHome(info, lhx, lhy);
-            if (lhx >= 0 && priest->NowState == HUMAN_STATE_IDLE)
-                movePriest(priestSN, priest->DR, priest->UR,
-                           (double)lhx * BLOCKSIDELENGTH, (double)lhy * BLOCKSIDELENGTH,
-                           info.GameFrame);
-            return;                 // ★回塔优先：本帧不转化/不迎击/不拉怪
+            // 【防御④】原来无条件 return ✗ —— movePriest 有 15 帧硬闸+1 格容差，可能根本没下令 ✓
+            //   → 该帧祭司既不转化、也不回塔 ✗（塔外 4~8 格空转 ✓）
+            const bool convBusy = (m_convertStartFrame >= 0
+                                   && info.GameFrame - m_convertStartFrame < 200);
+            bool ordered = false;
+            if (lhx >= 0 && priest->NowState == HUMAN_STATE_IDLE && !convBusy)
+                ordered = movePriest(priestSN, priest->DR, priest->UR,
+                                     (double)lhx * BLOCKSIDELENGTH, (double)lhy * BLOCKSIDELENGTH,
+                                     info.GameFrame);
+            if (ordered) return;    // ★只有真下了回塔令才让位 ✓
         }
     }
 
@@ -2820,6 +2846,21 @@ void UsrAI::handlePriest(const tagInfo& info)
     if (inConversion) m_issued.insert(priestSN);
     bool lowBlood = (priest->Blood < priest->MaxBlood * 3 / 5);      // <60%
     bool criticalBlood = (priest->Blood < priest->MaxBlood / 4);     // <25% 濒死
+    // 【用户实测·第二波祭司被打死】增加"中血断法"：hp<50% 就必须逃命 ✓
+    //   引擎只在转化**成功**时才进冷却（Core.cpp:2391）→ 断法几乎无损 ✓ 命比念咒重要 ✓
+    const bool breakOff = (priest->Blood < priest->MaxBlood / 2);    // <50%
+    // 【修复·中弹判定太窄】beingHit 只是"本帧比上帧掉血"✗（远程间歇攻击大量帧为假 ✗）
+    //   → 加"有敌人正锁定祭司且 ≤12 格"作为等价触发 ✓
+    bool underFire = beingHit;
+    if (!underFire) {
+        for (const tagArmy& ef : info.enemy_armies) {
+            if (ef.Blood <= 0) continue;
+            if (ef.WorkObjectSN == priestSN
+                && calDistance(priest->DR, priest->UR, ef.DR, ef.UR) <= 12.0 * BLOCKSIDELENGTH) {
+                underFire = true; break;
+            }
+        }
+    }
 
     // ================= 【第二波专属·第一波逻辑完全不动】 =================
     //   第二波有 2 个战车弓兵（对祭司 +7 特攻 ≈7.3 DPS/个），它们会隔着塔锁定祭司；
@@ -2830,7 +2871,7 @@ void UsrAI::handlePriest(const tagInfo& info)
     //   注意：不新增走位分支（走位放在转化之后的 3.5 节），避免把转化挤掉。
     //   想覆盖第三波：把下面的 FRAME_WAVE3 改成 99999。
     const bool wave2Defense = (info.GameFrame > FRAME_WAVE2 - 3000
-                               && info.GameFrame <= FRAME_WAVE3);
+                               && info.GameFrame <= 99999);   // 【第三波保命】原到 21000 就失效 ✗ → 波3也自卫转化 ✓
     int lockedRangedSN = -1;      // 锁定祭司的"远程兵"（含战车弓）
     int lockedAnySN = -1;         // 锁定祭司的任意敌人
     if (wave2Defense) {
@@ -2890,8 +2931,8 @@ void UsrAI::handlePriest(const tagInfo& info)
         }
     }
 
-    if (beingHit && !info.enemy_armies.empty()
-        && (criticalBlood || (!inConversion && lowBlood))) {
+    if (underFire && !info.enemy_armies.empty()
+        && (criticalBlood || breakOff || (!inConversion && lowBlood))) {
         // 走位目标 = 固定安全位（塔下/市中心，getPriestHome）：挨打就往安全位撤，到位即停
         // （不用"塔+敌人反方向偏移"——敌人位置每帧变 → 目标抖动 → 每帧重新下令）
         int hx, hy;
@@ -2900,7 +2941,7 @@ void UsrAI::handlePriest(const tagInfo& info)
         double gy = (double)hy * BLOCKSIDELENGTH;
         // 节流下令：60帧内目标不变不重复下令（防每帧打断移动/挤掉转化指令）
         bool ordered = movePriest(priestSN, priest->DR, priest->UR, gx, gy, info.GameFrame);
-        if (ordered || criticalBlood) return;   // 已下令，或濒死 → 本帧不再转化
+        if (ordered || criticalBlood || breakOff) return;   // ★中血以下也断法逃命 ✓（原来只到 25% ✗）
         // 转化中被打但没到濒死：不 return → 把本帧让给转化逻辑（转化继续走完）
     }
 
@@ -2924,7 +2965,18 @@ void UsrAI::handlePriest(const tagInfo& info)
             if (e.Sort != AT_BOWMAN && e.Sort != AT_CHARIOT_ARCHER
                 && e.Sort != AT_COMPOSITE_BOWMAN && e.Sort != AT_SLINGER) continue;
             double d = calDistance(priest->DR, priest->UR, e.DR, e.UR);
+            if (d > DIS_PRIEST * BLOCKSIDELENGTH) continue;   // 【防御③】超射程不选（引擎会清零重随机 ✗）
             if (d < bestR) { bestR = d; target = e.SN; }
+        }
+        // 【防御③·文档 L33】次优先：斧头兵/剑士（"之后再转化斧头兵"）
+        if (target < 0) {
+            for (const tagArmy& e : info.enemy_armies) {
+                if (e.Blood <= 0) continue;
+                if (e.Sort != AT_CLUBMAN && e.Sort != AT_SWORDSMAN) continue;
+                double d = calDistance(priest->DR, priest->UR, e.DR, e.UR);
+                if (d > DIS_PRIEST * BLOCKSIDELENGTH) continue;
+                if (d < bestR) { bestR = d; target = e.SN; }
+            }
         }
         if (target < 0 && aggressive) {
             // 激进：无远程兵 → 最近敌人
@@ -3184,8 +3236,14 @@ void UsrAI::handlePriest(const tagInfo& info)
     // 【修复】转化进行中不许走位打断（HumanMove 会 suspendRelation → 转化作废重来）
     // 【C 方案·波3不游走】波 3 起不再为"躲威胁"移动 ✗（原来也是移到塔背面 → 追兵一动就换边 ✗）
     //   不 return → 流程继续到第 6 步"回塔待命"，所以他照样会自己走回塔下 ✓
-    if (info.GameFrame < FRAME_WAVE3
-        && !inConversion && threat != nullptr && nearest < threatDist) {
+    // 【用户实测·第三波祭司会死】原来这里的 `info.GameFrame < FRAME_WAVE3` 闸门 ✗
+    //   让波3**完全不为躲威胁移动** → 祭司停在塔下空转 → 被 2 战车弓 + 复合弓(射程7)点死 ✗✗
+    //   当初加闸门是为了防"追兵一动就换边、来回抽搐"✗ —— 但该问题**已由
+    //   priestRetreatLatched（锁存撤退点）解决** ✓ → 闸门已无必要，只剩坏处 ✓
+    //   保留全部安全条件：只在"有 10 格内威胁 + 没在施法"时才躲 ✓
+    //   （inConversion 保证 HumanMove 不打断正在进行的转化 ✓）
+    //   副带好处：转化冷却 20 秒期间祭司不再空转，会退回塔背面 ✓
+    if (!inConversion && threat != nullptr && nearest < threatDist) {
         int hx, hy;
         getPriestHome(info, hx, hy);
         if (hx >= 0) {
