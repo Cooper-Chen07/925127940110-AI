@@ -651,6 +651,11 @@ void UsrAI::manageVillagers(const tagInfo& info)
     }
     // 【发育策略】不派挖石工：初始 150 石正好建 1 座塔（塔上限 1 座），人力全给食物/木头/黄金
     int targetStone = 0;
+    // [FIX stone-for-towers] 箭塔花的是石头 150（不是木头），而原来 targetStone 恒为 0
+    //   -> 开局 INITIAL_STONE=150 用掉后就再也补不了塔。实测塔被第三波投石车拆掉
+    //   (T2->T1) 后无法重建，而文档 29 行明确说箭塔就是这套防守的核心。
+    //   塔不足 4 座且已过 4:00 -> 安排 2 个采石工（塔够了就自动停，不浪费人力）
+    if (countBuildingAny(info, BUILDING_ARROWTOWER) < 4 && info.GameFrame > 6000) targetStone = 2;
     // 【3.0.7g 调整】金矿 200→400（翻倍）→ 黄金更充裕，挖金保持 3 人
     // 【发育策略】3 人采金：采金不占食物预算，且铜器后造兵急用黄金；多余农民优先采金而非伐木
     // 【用户要求·3.0.7g】升级铜器前**不采黄金**：原来 3 个采金的人先去采食物/木材；
