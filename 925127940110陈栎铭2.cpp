@@ -2223,6 +2223,18 @@ void UsrAI::trainArmy(const tagInfo& info)
             //   弓箭手 40 食 + 20 木、不需要科技、不花黄金 → 正好填上"升级期完全没兵"的空档，
             //   第一波转化来的部队万一被打掉也不至于防线全空。
             //   （存活数 < 2 就补，升级期间被打死了会自动补回 2 个；升完铜器立刻转大弓手）
+            // [FIX range-gap] measured f=14711(9:48): food 590, wood 87, but army=1 and priest hp52.
+            //   branches below only cover (a) during the bronze upgrade and (b) after bronze --
+            //   so between 5:20 and the bronze order the range trained NOTHING at all.
+            //   cheap bowman = 40 food + 20 wood, no tech, no gold -> fill 3 escorts for the priest.
+            if (!bronze && m_bronzeUpgradeFrame < 0 && info.GameFrame >= 8000
+                && countArmy(info, AT_BOWMAN) < 3
+                && info.Meat >= BUILDING_RANGE_CREATE_BOWMAN_FOOD
+                && info.Wood >= BUILDING_RANGE_CREATE_BOWMAN_WOOD) {
+                BuildingAction(b.SN, BUILDING_RANGE_CREATE_BOWMAN);
+                m_issued.insert(b.SN);
+                break;
+            }
             if (!bronze && m_bronzeUpgradeFrame >= 0
                 && countArmy(info, AT_BOWMAN) < 2
                 && info.Meat >= BUILDING_RANGE_CREATE_BOWMAN_FOOD
