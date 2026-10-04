@@ -4257,8 +4257,12 @@ static void attackPhase(UsrAI* self, const tagInfo& info)
                 m_convertStartFrame = f;                    // 交给 200 帧保护窗
             } else {
                 // 【修复·祭司掉队】射程内没敌人可转 → 跟到"前压点后方 6 格"，别冲进最前排
-                const int fx = m_atkFrontX + ((m_atkFrontX < m_atkTargetX) ? -6 : 6);
-                const int fy = m_atkFrontY + ((m_atkFrontY < m_atkTargetY) ? -6 : 6);
+                // 【实测修复·祭司在推进期被消耗】原来跟到"前压点后方 6 格" ✗ ——
+//   而敌方远程(战车弓/复合弓)射程 7 格 ✗ → 他正好站在射程内挨打 ✓（实测 hp100→19 ✗）
+//   且敌兵对祭司是**硬锁**（只有打死才换目标 ✗）→ 撤退没用 ✓ 只能拉开距离 ✓
+//   → 改成后方 **12 格**（7+5 安全余量 ✓）；hp<60% 时上面的 lowBlood 分支会继续把他拉回集结区 ✓
+const int fx = m_atkFrontX + ((m_atkFrontX < m_atkTargetX) ? -12 : 12);
+const int fy = m_atkFrontY + ((m_atkFrontY < m_atkTargetY) ? -12 : 12);
                 if (priest->NowState == HUMAN_STATE_IDLE
                     && atkDist(priest->DR, priest->UR, atkBD(fx), atkBD(fy))
                        > 3.0 * BLOCKSIDELENGTH) {
