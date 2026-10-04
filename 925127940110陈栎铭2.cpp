@@ -86,6 +86,7 @@ static int m_scoutDone = 0;                    // 1=探路任务结束（成功�
 static int m_atkOn = 0;                       // 1=反攻已启动
 static int m_atkHoldUntil = 0;                // [FIX hold-off] 撤销反攻后的冷却截止帧（防止每帧重新触发导致部队来回跑）
 static int m_atkCornerIdx = 0;                // [FIX sweep] 找不到厂时轮换搜索的角（0=敌人来向，1~3=其余角）
+static int m_atkCornerFrame = 0;              // [FIX sweep2] 上次换角的帧（纯计时轮换）
 static int m_atkPhase = 0;                    // 0=集结 1=推进拉扯 2=交战 3=冲锋
 // 【修复·防御集结重复下令】记录每个兵上次被叫回集结点的帧（90 帧节流 ✓）
 static std::map<int,int> m_homeRecallFrame;
@@ -3976,11 +3977,14 @@ static void attackPhase(UsrAI* self, const tagInfo& info)
     }
 
     // [FIX sweep] 已在推但 2000 帧还找不到厂 → 换下一个角搜索（4 角轮换）
-    if (m_atkOn && m_siegeSN < 0 && m_atkPhase >= 2 && f - m_atkPhaseFrame > 2000) {
+    // [FIX sweep2] 实测旧条件(m_atkPhase>=2 且连续 2000 帧)几乎永不成立 -> 阶段总被召回/兵力下降重置 ✗
+    //   改成**纯计时**：只要在反攻且厂未知，每 2500 帧(100秒)就换一个角搜索 ✓
+    if (m_atkOn && m_siegeSN < 0 && f - m_atkCornerFrame > 2500) {
+        m_atkCornerFrame = f;
         m_atkCornerIdx = (m_atkCornerIdx + 1) & 3;
         atkPickPoints(info);        // 换角后重选目标与集结点
-        m_atkPhaseFrame = f;
         m_atkPhase = 0;             // 回到集结，重新推进
+        m_atkPhaseFrame = f;
     }
     // ---------- 1) 触发（三档）----------
     if (!m_atkOn) {
