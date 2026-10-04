@@ -3933,6 +3933,26 @@ static void attackPhase(UsrAI* self, const tagInfo& info)
         return;                             // 本帧不再下反攻令；下一帧 defense 接管、把兵叫回基地 ✓
     }
 
+    // ---------- 0.5) [FIX recall-and-hold] 祭司被打/血<75% → 主动撤销反攻 ✓ ----------
+    //   实测：atk on1 期间祭司 hp 一路掉到 14~21 后死亡（9:36~10:00 结束 ✗）。
+    //   上一版只在 defense 里"允许它运行"，结果 defense 与 attackPhase **每帧抢指挥权** ✗
+    //   （兵在"回家救人"和"冲向敌营"之间来回）→ 谁也没救成 ✓
+    //   现在照上面的现成模式：直接 m_atkOn=0 → defense 完全接管（箭塔转火 + 部队回防）✓
+    //   祭司恢复(血>=75% 且无人打他)后，下面的触发条件会**自动重新启动反攻** ✓
+    if (m_atkOn && priest != nullptr) {
+        bool hurt = (priest->Blood < priest->MaxBlood * 3 / 4);
+        if (!hurt)
+            for (const tagArmy& e : info.enemy_armies)
+                if (e.Blood > 0 && e.WorkObjectSN == priestSN) { hurt = true; break; }
+        if (hurt) {
+            m_atkOn = 0;
+            m_atkPhase = 0;
+            m_assaultSN = -1;
+            m_atkPhaseFrame = f;
+            return;
+        }
+    }
+
     // ---------- 1) 触发（三档）----------
     if (!m_atkOn) {
         // round2#6 【修复·永远不反攻】原来"没见过敌方建筑"就永不启动 ✗
