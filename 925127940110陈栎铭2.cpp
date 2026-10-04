@@ -3778,8 +3778,16 @@ static void atkPickPoints(const tagInfo& info)
         const int mL = MAP_L, mU = MAP_U;
         const int cx = (m_centerX >= 0) ? m_centerX : mL / 2;
         const int cy = (m_centerY >= 0) ? m_centerY : mU / 2;
-        m_atkTargetX = (cx < mL / 2) ? (mL - 10) : 10;
-        m_atkTargetY = (cy < mU / 2) ? (mU - 10) : 10;
+        // 【实测修复·军队打错方向】原来兜底只用"自家象限的对角" ✗
+        //   实测：随机地图里敌人不一定在对角 → 军队冲向 (90,10) 整局 bld0（一座敌建筑都没看到）✗✗
+        //   而 m_enemyDirX/Y 已在 defense(:2421) 按**第一波来袭敌人的真实坐标**记录过 ✓ 最可靠 ✓
+        if (m_enemyDirX != 0 || m_enemyDirY != 0) {
+            m_atkTargetX = (m_enemyDirX > 0) ? (mL - 10) : ((m_enemyDirX < 0) ? 10 : cx);
+            m_atkTargetY = (m_enemyDirY > 0) ? (mU - 10) : ((m_enemyDirY < 0) ? 10 : cy);
+        } else {
+            m_atkTargetX = (cx < mL / 2) ? (mL - 10) : 10;
+            m_atkTargetY = (cy < mU / 2) ? (mU - 10) : 10;
+        }
     }
     // 【修复·祭司往外跑】集结点原来是"目标点往自家退 4 格"= 贴着敌营 ✗ →
     //   反攻一触发就把祭司派到敌营门口（现象：他主动离开箭塔往外跑）。
