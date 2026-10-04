@@ -57,6 +57,10 @@ static const int FARM_WOOD_GATE  = 200;  // 开新田的木头门槛：木头 < 
                                          //   （实现用户要求："没食物可采/不能种田 → 先伐木，木头够了再种田"）
 static const int GOLD_FARMERS_FIX = 3;   // 采金固定人数（黄金 ≥300 时降到 2）
 
+// 【跨模块·探路兵豁免】这两个量 defense / attackPhase 都要用 → 必须声明在它们之前 ✗
+static int m_scoutUnitSN = -1;                 // 当前侦察兵 SN（-1=没有）
+static int m_scoutDone = 0;                    // 1=探路任务结束（成功或放弃）
+
 static std::set<int> m_farmTaken;                       // 【修复·挤同一块田】本帧已经被派了人的农田 SN
                                                         //   快照 info 是帧首的，派出去的人不会立刻反映进来，
                                                         //   所以必须自己记账，否则同一帧会把多个人派到同一块田 ✗
@@ -2222,6 +2226,9 @@ void UsrAI::defense(const tagInfo& info)
 
     for (const tagArmy& a : info.armies) {
         if (a.Sort == AT_PRIEST || a.Sort == AT_SCOUT) continue;   // 祭司/侦察骑兵单独调度
+        // 【跨模块·豁免】我方派出去探路的那个兵不受 defense 调度 ✗
+        //   否则它一到路点（帧首快照里是 IDLE）就被"回塔集结"叫回家 ✗
+        if (m_scoutUnitSN >= 0 && !m_scoutDone && a.SN == m_scoutUnitSN) continue;
         if (m_issued.count(a.SN)) continue;                         // 本帧已下令
 
         if (enemyVisible) {
@@ -2293,35 +2300,53 @@ void UsrAI::defense(const tagInfo& info)
         if (m_issued.count(a.SN)) continue;
 
         if (enemyVisible) {
-            // ① 战车弓兵绝对优先（第二波专杀祭司）：只要视野内有战车弓兵，所有兵优先锁定它
-            //    拉仇恨：战车弓兵被攻击后会反击攻击者，从而保护祭司
+            // 【用户要求·第二三波】小兵**分散**去拉不同远程兵的仇恨（一个兵对一个远程兵 ✓），
+            //   近战兵交给箭塔处理（小兵不去追远处近战 ✗）
+            //   做法与上面"救祭司"那段一致：统计每个候选已被几个己方兵锁定，
+            //   优先打"被锁最少"的（同数则取最近）→ 自然分散 ✓
+            std::vector<int> picks;
+            for (const tagArmy& e : info.enemy_armies)
+                if (e.Sort == AT_CHARIOT_ARCHER) picks.push_back(e.SN);       // ① 战车弓最优先
+            if (picks.empty())
+                for (const tagArmy& e : info.enemy_armies)
+                    if (e.Sort == AT_STONE_THROWER || e.Sort == AT_COMPOSITE_BOWMAN
+                        || e.Sort == AT_BOWMAN || e.Sort == AT_SLINGER)
+                        picks.push_back(e.SN);                                // ② 其他远程
             int target = -1;
-            double bestR = 1e18;
-            for (const tagArmy& e : info.enemy_armies) {
-                if (e.Sort != AT_CHARIOT_ARCHER) continue;
-                double d = calDistance(a.DR, a.UR, e.DR, e.UR);
-                if (d < bestR) { bestR = d; target = e.SN; }
-            }
-            // ② 无战车弓兵 → 其他远程威胁（投石车>复合弓兵>弓箭手——打建筑/远程压制）
-            if (target < 0) {
-                bestR = 1e18;
-                for (const tagArmy& e : info.enemy_armies) {
-                    if (e.Sort != AT_STONE_THROWER
-                        && e.Sort != AT_COMPOSITE_BOWMAN && e.Sort != AT_BOWMAN) continue;
-                    double d = calDistance(a.DR, a.UR, e.DR, e.UR);
-                    if (d < bestR) { bestR = d; target = e.SN; }
+            if (!picks.empty()) {
+                std::unordered_map<int,int> pickLocked;
+                for (const tagArmy& my : info.armies) {
+                    if (my.Sort == AT_PRIEST || my.Sort == AT_SCOUT) continue;
+                    if (my.WorkObjectSN <= 0) continue;
+                    for (int psn : picks)
+                        if (psn == my.WorkObjectSN) { pickLocked[psn]++; break; }
+                }
+                int bestCnt = 0x7fffffff;
+                double bestD = 1e18;
+                for (int psn : picks) {
+                    const tagArmy* pe = nullptr;
+                    for (const tagArmy& e : info.enemy_armies)
+                        if (e.SN == psn) { pe = &e; break; }
+                    if (pe == nullptr) continue;
+                    const int lk = pickLocked[psn];
+                    const double d = calDistance(a.DR, a.UR, pe->DR, pe->UR);
+                    if (lk < bestCnt || (lk == bestCnt && d < bestD)) {
+                        bestCnt = lk; bestD = d; target = psn;
+                    }
                 }
             }
-            // ③ 没有远程 → 攻击最近敌人
+            // ③ 没有远程目标 → 只打**贴到 6 格内**的敌人（6 < 箭塔射程 7 ✓）
+            //   远处的近战交给箭塔，小兵不追 ✗（避免白白送人头 ✓）
             if (target < 0) {
-                double best = 1e18;
+                double best = 6.0 * BLOCKSIDELENGTH;
                 for (const tagArmy& e : info.enemy_armies) {
-                    double d = calDistance(a.DR, a.UR, e.DR, e.UR);
+                    const double d = calDistance(a.DR, a.UR, e.DR, e.UR);
                     if (d < best) { best = d; target = e.SN; }
                 }
                 if (target < 0) {
+                    best = 6.0 * BLOCKSIDELENGTH;
                     for (const tagFarmer& e : info.enemy_farmers) {
-                        double d = calDistance(a.DR, a.UR, e.DR, e.UR);
+                        const double d = calDistance(a.DR, a.UR, e.DR, e.UR);
                         if (d < best) { best = d; target = e.SN; }
                     }
                 }
@@ -2835,7 +2860,11 @@ void UsrAI::handlePriest(const tagInfo& info)
         //   < 箭塔射程 7 → 箭塔锁得到它 → 仇恨从祭司转到塔上。
         // 【修复·打转】撤退点改成锁存点（priestRetreatLatched）→ 不再每帧跟着追兵变；
         // 【修复·不自保】加 !beingHit：正在挨打时让位给上面的转化逻辑（先保命/先转化）。
-        if (needLure && lureCA != nullptr && !inConversion && !criticalBlood && !beingHit) {
+        // 【C 方案·波3不游走】波 3（>=FRAME_WAVE3）起不再为"拉怪"移动 ✗
+        //   （小兵现在会分散去拉不同远程兵的仇恨 ✓，不需要祭司自己跑位）
+        //   注意：只加闸门 —— 转化逻辑（1.6 自卫 / 主动 2-3 / G2 兜底）完全没动 ✓
+        if (info.GameFrame < FRAME_WAVE3
+            && needLure && lureCA != nullptr && !inConversion && !criticalBlood && !beingHit) {
             int hx, hy;
             getPriestHome(info, hx, hy);
             if (hx >= 0) {
@@ -2862,7 +2891,10 @@ void UsrAI::handlePriest(const tagInfo& info)
     //    目标 = getPriestHome（敌人反侧最远的塔，固定值）——与"被攻击走位/回塔下"目标统一，
     //    防止"最近塔"与"敌人反侧塔"两个不同目标交替触发 → 祭司两点来回横跳
     // 【修复】转化进行中不许走位打断（HumanMove 会 suspendRelation → 转化作废重来）
-    if (!inConversion && threat != nullptr && nearest < threatDist) {
+    // 【C 方案·波3不游走】波 3 起不再为"躲威胁"移动 ✗（原来也是移到塔背面 → 追兵一动就换边 ✗）
+    //   不 return → 流程继续到第 6 步"回塔待命"，所以他照样会自己走回塔下 ✓
+    if (info.GameFrame < FRAME_WAVE3
+        && !inConversion && threat != nullptr && nearest < threatDist) {
         int hx, hy;
         getPriestHome(info, hx, hy);
         if (hx >= 0) {
@@ -2912,13 +2944,11 @@ static const int SCOUT_GIVEUP_LOST = 3;       // 耗材死这么多就放弃探�
 static const int SCOUT_GIVEUP_EXPL = 95;      // 已探明比例(%)达到就放弃
 static const int SCOUT_DONE_FRAME  = 99999;   // 到这一帧无论结果都收工（22500→26000，窗口拉长）
 
-static int m_scoutUnitSN = -1;                 // 当前侦察兵 SN（-1=没有）
 static int m_scoutWPI = 0;                     // 当前路点序号
 static int m_scoutWPX = -1, m_scoutWPY = -1;   // 当前路点（块坐标）
 static int m_scoutWpFrame = -1;                // 进入当前路点的帧（超时用）
 static int m_scoutOrderFrame = -9999;          // 上次下令帧
 static int m_scoutLost = 0;                    // 耗材损失数
-static int m_scoutDone = 0;                    // 1=探路任务结束（成功或放弃）
 static int m_scoutExplChk = -9999;             // 上次统计探明率的帧
 static int m_scoutExplPct = 0;                 // 已探明比例(%)
 static int m_scoutBldSeen = 0;                 // 见过的敌方建筑数（峰值）
