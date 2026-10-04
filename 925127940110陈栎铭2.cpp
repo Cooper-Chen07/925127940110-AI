@@ -3956,7 +3956,7 @@ static void attackPhase(UsrAI* self, const tagInfo& info)
     //   现在照上面的现成模式：直接 m_atkOn=0 → defense 完全接管（箭塔转火 + 部队回防）✓
     //   祭司恢复(血>=75% 且无人打他)后，下面的触发条件会**自动重新启动反攻** ✓
     if (m_atkOn && priest != nullptr) {
-        bool hurt = (priest->Blood < priest->MaxBlood * 3 / 4);
+        bool hurt = (priest->Blood < priest->MaxBlood / 2);   // [RECALIB] 75%->50%: 波次里持续掉血导致每次召回都加冷却, 反攻被永久压制(实测14:36兵4却atk=0)
         if (!hurt)
             for (const tagArmy& e : info.enemy_armies)
                 if (e.Blood > 0 && e.WorkObjectSN == priestSN) { hurt = true; break; }
@@ -3965,7 +3965,7 @@ static void attackPhase(UsrAI* self, const tagInfo& info)
             m_atkPhase = 0;
             m_assaultSN = -1;
             m_atkPhaseFrame = f;
-            m_atkHoldUntil = f + 1500;   // [FIX hold-off] 60 秒内不再重新反攻 ✓
+            m_atkHoldUntil = f + 400;   // [RECALIB] 60秒->16秒   // [FIX hold-off] 60 秒内不再重新反攻 ✓
             return;
         }
     }
