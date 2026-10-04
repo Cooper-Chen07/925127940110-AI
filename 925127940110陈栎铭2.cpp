@@ -656,7 +656,9 @@ void UsrAI::manageVillagers(const tagInfo& info)
     //   -> 开局 INITIAL_STONE=150 用掉后就再也补不了塔。实测塔被第三波投石车拆掉
     //   (T2->T1) 后无法重建，而文档 29 行明确说箭塔就是这套防守的核心。
     //   塔不足 4 座且已过 4:00 -> 安排 2 个采石工（塔够了就自动停，不浪费人力）
-    if (countBuildingAny(info, BUILDING_ARROWTOWER) < 4 && info.GameFrame > 6000) targetStone = 2;
+    // [FIX stone2] 实测：只有 1~2 座塔的局祭司必死(hp-1)，4 座塔的局他 hp35 稳定 5 分钟 ✓
+    //   而采石太晚太慢（f>6000 起 2 人，实测 10:24 才 100 石 ✗）-> 提前到 2:00 且 3 人 ✓
+    if (countBuildingAny(info, BUILDING_ARROWTOWER) < 4 && info.GameFrame > 3000) targetStone = 3;
     // 【3.0.7g 调整】金矿 200→400（翻倍）→ 黄金更充裕，挖金保持 3 人
     // 【发育策略】3 人采金：采金不占食物预算，且铜器后造兵急用黄金；多余农民优先采金而非伐木
     // 【用户要求·3.0.7g】升级铜器前**不采黄金**：原来 3 个采金的人先去采食物/木材；
