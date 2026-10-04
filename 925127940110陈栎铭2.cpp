@@ -3790,9 +3790,9 @@ static void scoutPhaseS(UsrAI* self, const tagInfo& info)
 //   调用点在 processData 最后 → 同帧最后一条令，引擎按对象去重时保留它，
 //   所以**不需要改 defense()**（defense 只下令空闲的兵）。
 // ============================================================
-static const int ATK_EARLY_FRAME  = 21000;   // 提前线：第三波刚开始 + 兵很多 → 早点打出去
+static const int ATK_EARLY_FRAME  = 24000;   // [DOC-42] 文档原文："集结……一般在**防御过第三波之后，24000帧左右**启动" -> 原 21000(第三波刚开始)太早 ✗
 static const int ATK_EARLY_ARMY   = 24;
-static const int ATK_MAIN_FRAME   = 22500;   // 主启动线（推荐）
+static const int ATK_MAIN_FRAME   = 24000;   // [DOC-42] 同上（原 22500=15:00，第三波还没完 ✗）
 static const int ATK_MAIN_ARMY    = 18;
 static const int ATK_LAST_FRAME   = 38000;   // 兜底线（27000→38000 ≈25:20）：**主要条件仍是人口满** ✓
                                              //   原来 27000(18:00) 太早 —— 实测 19 分钟人口没满就冲出去了 ✗
@@ -3816,7 +3816,8 @@ static const int ATK_ABORT_ARMY   = 2;   // [FIX hysteresis] start needs >=3 but
 // 【策略文档·早集结早开战】文档(75行)："第二波防御一过就集结，集结 10 个左右复合弓就可以开战，
 //   差不多是 11 分钟多点" → 主要触发线 = 兵力 ≥ 10 且 帧 ≥ 16500(11:00) ✓
 static const int ATK_BOW_ARMY     = 3;       // 【实测】5→3：实测兵力被波次反复打掉、长期在 3~4 震荡 ✗ 够不到 5 → 反攻永不启动 ✗✗ 而不反攻=必然超时判负 ✗ → 3 兵也上（有农民肉盾+拆塔+祭司保命 ✓）       // 【实测】8→5：实测兵力长期在 4~6 震荡（波次消耗+食物紧张）✗ 够不到 8 → 反攻永不启动 ✗✗ → 15:36 仍 atk on0 ✓ 降到 5 ✓（另有农民肉盾+拆塔+祭司保命 ✓，小部队突袭仍可行 ✓）       // 【调优】10→8：文档说"10 个左右"✓ 实测常卡在 7-8 → 反攻永不触发 ✗（30 分钟上限下早开战才有时间冲厂 ✓）      // 早开战兵力门槛（≈10 个复合弓 ✓）
-static const int ATK_BOW_FRAME    = 14000;   // 【实测】16500→14000：文档 75 行"第二波防御一过就集结" ✓（第二波 13500 结束 ✓）而实测 16500 时还没到 → 反攻迟迟不启动 ✗   // 早开战时间门槛（11:00 ✓ 第二波之后 ✓）
+static const int ATK_BOW_FRAME    = 24000;   // [DOC-42] ★关键：原 14000(9:20) 早于第三波 4.7 分钟 ✗
+                                              //   导致军队被调走、祭司在第三波孤立被打死（实测 hp93->0 仅 12 秒）✓
 // 【文档 77 行·最后的冲锋】农民肉盾节流计时器
 static int m_farmerRushFrame = -99999;
 static const int ATK_CHARGE_MAXEN = 8;       // 【修复·被围还冲锋】敌人多于这个数 → 冲锋降级为阶段2走位 ✓
@@ -3998,7 +3999,7 @@ static void attackPhase(UsrAI* self, const tagInfo& info)
         //   atkPickPoints 本来就有"厂→敌建筑群中心→地图对角"的降级链 ✓
         //   → 给探路一个截止线：22500 帧后不再等情报 ✓
         if (f < m_atkHoldUntil) return;   // [FIX hold-off] 刚因祭司危险撤过反攻 → 冷却期内不再启动 ✓（否则每帧来回抢指挥权 ✗）
-        if (m_siegeSN < 0 && m_enemyBaseX < 0 && f < ATK_BOW_FRAME) return;   // 【实测修复·最后拦路石】原来等到 22500(15:00) ✗ 而实测 10:48 兵已 6、bld0（没探到任何敌建筑）→ 反攻被这道情报门永久挡住 ✗✗ 改成到 14000(9:20) 就盲推 ✓（atkPickPoints 会选地图对角 ✓ 每帧探厂会在路上抓到 ✓）
+        if (m_siegeSN < 0 && m_enemyBaseX < 0 && f < ATK_BOW_FRAME) return;   // 【实测修复·最后拦路石】原来等到 22500(15:00) ✗ 而实测 10:48 兵已 6、bld0（没探到任何敌建筑）→ 反攻被这道情报门永久挡住 ✗✗ 已按文档改为 24000(16:00，第三波之后) ✓（atkPickPoints 会选地图对角 ✓ 每帧探厂会在路上抓到 ✓）
         const bool okEarly = (f >= ATK_EARLY_FRAME && army >= ATK_EARLY_ARMY);
         const bool okMain  = (f >= ATK_MAIN_FRAME && army >= ATK_MAIN_ARMY
                               && (priest == nullptr
