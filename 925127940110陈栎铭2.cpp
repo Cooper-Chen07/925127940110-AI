@@ -767,12 +767,16 @@ void UsrAI::manageVillagers(const tagInfo& info)
             // 【用户要求】正在采集农田的农民：这块田快采完了（剩余 ≤40）而田还不够
             //   → **他自己去建一块新田**（不等引擎删田、也不用等专职建造者）→ 食物链不断档
             if (f.NowState == HUMAN_STATE_WORKING
-                && m_role.count(f.SN) && m_role[f.SN] == 5) {
+                && m_role.count(f.SN) && (m_role[f.SN] == 5 || isFood)) {   // [FIX farm-deadlock] food gatherers may build farms too
                 const tagBuilding* myFarm = nullptr;
                 for (const tagBuilding& fb : info.buildings)
                     if (fb.SN == f.WorkObjectSN && fb.Type == BUILDING_FARM) { myFarm = &fb; break; }
-                if (myFarm != nullptr && myFarm->Cnt <= 40
-                    && (!mapFoodLeft(info) || info.Meat < 200)) {
+                if ((myFarm != nullptr && myFarm->Cnt <= 40
+                         && (!mapFoodLeft(info) || info.Meat < 200))
+                        // [FIX farm-deadlock] measured: wood 855 / food 30 with only 1 farm -- the old rule
+                        //   required "already working a nearly-empty farm", so with 1 full farm nobody ever
+                        //   built more; berry gatherers (role!=5) never entered at all.
+                        || (countBuildingAny(info, BUILDING_FARM) < FARM_MIN_COUNT && info.Meat < 250)) {
                     int wantR = (info.GameFrame > FRAME_WAVE2) ? ((int)info.farmers.size() / 2) : 3;
                     if (wantR < FARM_MIN_COUNT) wantR = FARM_MIN_COUNT;
                     if (wantR > FARM_MAX_COUNT) wantR = FARM_MAX_COUNT;
