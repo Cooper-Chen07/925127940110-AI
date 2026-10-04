@@ -1555,6 +1555,10 @@ void UsrAI::manageCenter(const tagInfo& info)
                             && (int)info.Human_MaxNum - (int)info.farmers.size() >= 12);
     int farmerTarget = 20;
     if (needGoldFarmers) farmerTarget = 24;
+    // [FIX rush-bronze] 造农民是**最大的食物消耗**：50 食/个 × 20 个 = 1000 食，比升铜本身的 800 还多 ✗
+    //   实测升铜晚到 12:00（文档节奏是 6:00 ✗✗），而第三波(14:00)需要成规模的正规军 ✓
+    //   => 升铜前只养 14 个农民，先把 800 食凑出来冲铜器；升铜后再补到 20 ✓
+    if (!bronzeNow) farmerTarget = 14;
 
     for (const tagBuilding& b : info.buildings) {
         if (b.Type != BUILDING_CENTER) continue;
