@@ -1569,7 +1569,11 @@ void UsrAI::manageCenter(const tagInfo& info)
             // [FIX food-reserve] food is eaten by farmers (50 each) so army never grows,
             //   priest ends up with no escort and dies to wave2/3 (measured hp2).
             //   after 8:00, if bowmen < 3 -> stop making farmers, keep food for cheap bowmen (40 food each).
-            && !(info.GameFrame >= 8000 && countArmy(info, AT_BOWMAN) + countArmy(info, AT_COMPOSITE_BOWMAN) < 3)
+            // [FIX farmer-floor] the old rule stopped making farmers whenever bowmen < 3 -> villagers
+            //   stalled at 15 (measured f=21611 14:24: farmers 15, food 740, STILL no bronze).
+            //   Fewer villagers = less food = slower bronze. Now: grow to 18 farmers first, then reserve.
+            && !(info.GameFrame >= 8000 && (int)info.farmers.size() >= 18
+                 && countArmy(info, AT_BOWMAN) + countArmy(info, AT_COMPOSITE_BOWMAN) < 3)
 && info.Human_Num < info.Human_MaxNum
 && info.Meat >= BUILDING_CENTER_CREATEFARMER_FOOD) {
             BuildingAction(b.SN, BUILDING_CENTER_CREATEFARMER);
