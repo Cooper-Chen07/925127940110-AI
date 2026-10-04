@@ -658,7 +658,7 @@ void UsrAI::manageVillagers(const tagInfo& info)
     //   塔不足 4 座且已过 4:00 -> 安排 2 个采石工（塔够了就自动停，不浪费人力）
     // [FIX stone2] 实测：只有 1~2 座塔的局祭司必死(hp-1)，4 座塔的局他 hp35 稳定 5 分钟 ✓
     //   而采石太晚太慢（f>6000 起 2 人，实测 10:24 才 100 石 ✗）-> 提前到 2:00 且 3 人 ✓
-    if (countBuildingAny(info, BUILDING_ARROWTOWER) < 4 && info.GameFrame > 3000) targetStone = 3;
+    if (countBuildingAny(info, BUILDING_ARROWTOWER) < 4 && info.GameFrame > 3000) targetStone = 2;   // [REBALANCE] 3->2：14个农民里 3 个采石会把食物压到只剩 4 人 ✗（doc 29行："箭塔不需要新造，开局给的足够了"）
     // 【3.0.7g 调整】金矿 200→400（翻倍）→ 黄金更充裕，挖金保持 3 人
     // 【发育策略】3 人采金：采金不占食物预算，且铜器后造兵急用黄金；多余农民优先采金而非伐木
     // 【用户要求·3.0.7g】升级铜器前**不采黄金**：原来 3 个采金的人先去采食物/木材；
@@ -1558,7 +1558,9 @@ void UsrAI::manageCenter(const tagInfo& info)
     // [FIX rush-bronze] 造农民是**最大的食物消耗**：50 食/个 × 20 个 = 1000 食，比升铜本身的 800 还多 ✗
     //   实测升铜晚到 12:00（文档节奏是 6:00 ✗✗），而第三波(14:00)需要成规模的正规军 ✓
     //   => 升铜前只养 14 个农民，先把 800 食凑出来冲铜器；升铜后再补到 20 ✓
-    if (!bronzeNow) farmerTarget = 14;
+    // [REBALANCE] 实测"升铜前只养 14 个农民"**没有收益**（10:00 食物仍 ~390，与 20 农民时一样）
+    //   原因：农民少了收入也少（净效果为零）。doc 说"村民总人数控制在20个左右" ✓ -> 恢复 20 ✓
+    // if (!bronzeNow) farmerTarget = 14;   // 已撤销
 
     for (const tagBuilding& b : info.buildings) {
         if (b.Type != BUILDING_CENTER) continue;
