@@ -638,6 +638,15 @@ void UsrAI::manageVillagers(const tagInfo& info)
     //   文档 71 行也说"木材会成为瓶颈，怎么都不太够" → 前期伐木上限 5 → 8 ✓
     if (info.Wood < 150) targetWood = 6;        // 木头不足：6 人
     if (info.Wood < 80)  targetWood = 8;        // 严重不足：8 人
+    // 【发育提速·用户建议】升级链(市场+靶场)已建好、且还没开始升铜、且食物没到 800：
+    //   此时木头不再是瓶颈 ✗（链条已齐 ✓）→ 把伐木压到 4 人，其余全投食物 ✓
+    //   实测原来：5:12 链条就齐了却等到 8:00 才攒够 800 食 ✗（白等近 3 分钟 ✓）
+    if (m_bronzeUpgradeFrame < 0 && (int)info.Meat < 800
+        && countBuilding(info, BUILDING_MARKET) > 0
+        && countBuilding(info, BUILDING_RANGE) > 0
+        && info.Wood >= 120) {                  // 留 120 木缓冲（够一座房 30 + 农场 75 ✓）
+        targetWood = 4;
+    }
     // 【发育策略】不派挖石工：初始 150 石正好建 1 座塔（塔上限 1 座），人力全给食物/木头/黄金
     int targetStone = 0;
     // 【3.0.7g 调整】金矿 200→400（翻倍）→ 黄金更充裕，挖金保持 3 人
@@ -2156,6 +2165,14 @@ void UsrAI::trainArmy(const tagInfo& info)
 {
     if (info.Human_Num >= info.Human_MaxNum) return;   // 人口已满
     bool bronze = (info.civilizationStage >= CIVILIZATION_BRONZEAGE);
+    // 【发育提速②·升铜优先】实测：f=9911 食600 → f=12666 食50（掉 550 ✗）
+    //   造兵一直在吃食物 → 升铜要的 800 永远凑不齐 ✗
+    //   文档 29 行："前两波都不必造兵，箭塔也不需要新造，开局给的足够了" ✓
+    //   → 升级链(市场+靶场)已就绪、还没开始升铜、食物<800 时：暂停造兵攒食物 ✓
+    //   （升铜令已下则放行 → 升级期间的"2 个应急弓箭手"分支照常工作 ✓）
+    if (!bronze && m_bronzeUpgradeFrame < 0 && (int)info.Meat < 800
+        && countBuilding(info, BUILDING_MARKET) > 0
+        && countBuilding(info, BUILDING_RANGE) > 0) return;
 
     for (const tagBuilding& b : info.buildings) {
         if (b.Percent < 100 || b.Project != ACT_NULL) continue;   // 建造中或忙碌
@@ -2537,7 +2554,9 @@ void UsrAI::defense(const tagInfo& info)
             std::vector<int> candidates;
             if (priestSN >= 0) {
                 for (const tagArmy& e : info.enemy_armies)
-                    if (e.WorkObjectSN == priestSN) { candidates.push_back(e.SN); break; }
+                    // 【修复·只收第一个】原来 break ✗ → 3 个敌人一起打祭司时只有 1 个进候选
+                    //   → 后面"优先打被锁定最少的目标"的分散攻击设计完全失效 ✗ → 全收 ✓
+                    if (e.Blood > 0 && e.WorkObjectSN == priestSN) candidates.push_back(e.SN);
             }
             if (candidates.empty()) {
                 // 【3.0.7g 新策略】祭司特攻单位 + 投石车：
@@ -2545,7 +2564,8 @@ void UsrAI::defense(const tagInfo& info)
                 //   → 都是必须先杀的高危目标
                 for (const tagArmy& e : info.enemy_armies)
                     if (e.Sort == AT_CHARIOT_ARCHER || e.Sort == AT_CHARIOT
-                        || e.Sort == AT_STONE_THROWER)
+                        || e.Sort == AT_STONE_THROWER
+                        || e.Sort == AT_COMPOSITE_BOWMAN || e.Sort == AT_BOWMAN)   // 【修复】漏了复合弓/弓兵 ✗
                         candidates.push_back(e.SN);
             }
             if (!candidates.empty()) {
@@ -3491,7 +3511,12 @@ static void scoutPhaseS(UsrAI* self, const tagInfo& info)
         m_enemyBaseY = sumY / bldCnt;
     }
     if (bldCnt > m_scoutBldSeen) m_scoutBldSeen = bldCnt;
-    if (m_scoutBldSeen >= 4) {                // round2#7b 阈值 2→4（看到两座房子就收工太早 ✗）
+    // 【修复·收工太早会永远赢不了】原来看到 4 座敌方建筑就收工 ✗
+    //   敌营有很多建筑（住房/兵营/靶场/箭塔…）→ 很可能看了 4 座就收工，而**武器工程厂还没看到** ✗✗
+    //   → m_siegeSN 永远 -1 → attackPhase 没有转化目标 → 永远赢不了 ✗
+    //   → 收工条件加上"且已看到厂" ✓（放弃线仍由 SCOUT_GIVEUP_EXPL/LOST 兜底 ✓）
+    //   引擎事实：explored 一旦置 1 永不回退（GameWidget.cpp:181）→ 看到一次就够 ✓
+    if (m_scoutBldSeen >= 4 && m_siegeSN >= 0) {
         m_scoutDone = 1;
         if (m_scoutDoneWhy == 0) m_scoutDoneWhy = 2;
     }
@@ -3660,6 +3685,8 @@ static const int ATK_ABORT_ARMY   = 6;       // 【修复·兵不够还硬冲】
 //   差不多是 11 分钟多点" → 主要触发线 = 兵力 ≥ 10 且 帧 ≥ 16500(11:00) ✓
 static const int ATK_BOW_ARMY     = 10;      // 早开战兵力门槛（≈10 个复合弓 ✓）
 static const int ATK_BOW_FRAME    = 16500;   // 早开战时间门槛（11:00 ✓ 第二波之后 ✓）
+// 【文档 77 行·最后的冲锋】农民肉盾节流计时器
+static int m_farmerRushFrame = -99999;
 static const int ATK_CHARGE_MAXEN = 8;       // 【修复·被围还冲锋】敌人多于这个数 → 冲锋降级为阶段2走位 ✓
 static const int ATK_FRONT_CLEAR  = 12;      // 【用户要求·一层层拉出来打】前方这么多格内有敌人 → 原地打完再推进 ✓
 
@@ -4072,6 +4099,35 @@ static void attackPhase(UsrAI* self, const tagInfo& info)
                                  && f - m_convertStartFrame < 200);
         const bool canCast = (priest->ConvertCooldown <= 0) && !castWindow;
         if (m_atkPhase >= 3) {
+            // ===== 【文档 77 行·最后的冲锋】把前线农民也压上去当肉盾 ✓ =====
+            //   文档："村民冲箭塔和投石车，给祭司制造机会"（作者自己没实现 ✓）
+            //   祭司转化建筑必须贴邻(≈1.83格) ✗ 而敌营有 5 塔 + 31 兵 → 一靠近就被集火 ✗
+            //   保守做法：只动**前线附近**(≤25格)的**空闲**农民 ✓ 每 90 帧最多 6 人 ✓
+            if (m_siegeSN >= 0 && m_siegeX >= 0
+                && info.GameFrame - m_farmerRushFrame >= 90) {
+                int rushed = 0;
+                for (const tagFarmer& fm : info.farmers) {
+                    if (fm.NowState != HUMAN_STATE_IDLE) continue;      // 只动闲着的 ✓ 不打断采集
+                    if (m_issued.count(fm.SN)) continue;
+                    if (atkDist(fm.DR, fm.UR, atkBD(m_siegeX), atkBD(m_siegeY))
+                        > 25.0 * BLOCKSIDELENGTH) continue;            // 不横跨全图 ✓
+                    int bestE = -1; double bestED = 1e18;
+                    for (const tagArmy& e : info.enemy_armies) {
+                        if (e.Blood <= 0) continue;
+                        double d = atkDist(fm.DR, fm.UR, e.DR, e.UR);
+                        if (d < bestED) { bestED = d; bestE = e.SN; }
+                    }
+                    if (bestE >= 0 && bestED < 30.0 * BLOCKSIDELENGTH) {
+                        self->HumanAction(fm.SN, bestE);               // 打身边的敌人（吸火力 ✓）
+                    } else {
+                        self->HumanMove(fm.SN, atkBD(m_siegeX), atkBD(m_siegeY));  // 走向厂（当肉盾 ✓）
+                    }
+                    m_issued.insert(fm.SN);
+                    if (++rushed >= 6) break;
+                }
+                if (rushed > 0) m_farmerRushFrame = info.GameFrame;
+            }
+
             // 冲锋：贴到厂上转化（唯一的胜利途径）
             if (m_siegeSN >= 0 && m_siegeX >= 0) {
                 const double dS = atkDist(priest->DR, priest->UR, atkBD(m_siegeX), atkBD(m_siegeY));
