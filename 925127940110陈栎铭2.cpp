@@ -72,7 +72,7 @@ static int m_eleCallSN = -1;             // 已经为哪头大象调用过伐木
 // 本帧已经派往这头大象的农民数（每帧清空 ✓）
 //   为什么要它：帧首快照不随本帧派令更新 → 同一帧里所有空闲农民都会看到 c==0
 //   → 会全部被派去同一头大象 ✗（与"多人挤一块农田"同源 ✓）
-static const int HUNT_WAIT_MAX = 600;    // 【用户要求·别站着不动】等队友打猎的最长帧数（24 秒）
+static const int HUNT_WAIT_MAX = 150;   // 【经济#6】原来 600 帧=24 秒罚站 ✗ → 6 秒（文档 24 行：单人打羚羊也行）    // 【用户要求·别站着不动】等队友打猎的最长帧数（24 秒）
 static std::map<int,int> m_huntWaitSince; // 每个农民"从哪一帧开始等队友"（超时就放弃等待 ✓）
 static int m_eleSentSN = -1;             // 本帧正在组队的大象 SN
 static int m_eleSentCount = 0;           // 本帧已派往它的人数
@@ -576,6 +576,7 @@ bool UsrAI::findBuildBlock(const tagInfo& info, int& x, int& y, int w, int h, in
 //   但 manageVillagers 里"后期调用伐木富余人口打大象"的逻辑（约 :600）要先用它 ✗
 //   → 在这里先声明、后面再定义 ✓（C++ 允许先声明后定义）
 static bool resSafe(const tagInfo& info, const tagResource& r);
+static int countBuildingAny(const tagInfo& info, int type);   // 【经济#7】农田计数要含在建地基
 
 void UsrAI::manageVillagers(const tagInfo& info)
 {
@@ -649,7 +650,9 @@ void UsrAI::manageVillagers(const tagInfo& info)
         // 【策略文档 71 行·早期采金】"安排村民早点采集黄金，免得技术升好了没资源造兵"
         //   原来升级前 0 人采金 ✗ → ai_log 实证 f=5411 黄金仍是 0 ✗
         //   而复合弓兵要 20 金/个 ✗ → 没金 = 造不出兵 ✓
-        if ((int)info.farmers.size() >= 10) targetGold = 2;
+        // 【经济#5】铜器前黄金没用（金矿远、金矿旁仓库要铜器后才建 → 实测 G0）
+        //   固定 2 人白占 1 个食物农民 → 改 1 人；升铜期间下面的 elapsed 分支会自动加到 2~3 ✓
+        if ((int)info.farmers.size() >= 10) targetGold = 1;
         if (m_bronzeUpgradeFrame >= 0) {
             int elapsed = info.GameFrame - m_bronzeUpgradeFrame;
             targetGold = 2 + elapsed / 500;        // 升级中再陆续加人（每 20 秒 +1）
@@ -764,7 +767,7 @@ void UsrAI::manageVillagers(const tagInfo& info)
                     int wantR = (info.GameFrame > FRAME_WAVE2) ? ((int)info.farmers.size() / 2) : 3;
                     if (wantR < FARM_MIN_COUNT) wantR = FARM_MIN_COUNT;
                     if (wantR > FARM_MAX_COUNT) wantR = FARM_MAX_COUNT;
-                    if (countBuilding(info, BUILDING_FARM) < wantR
+                    if (countBuildingAny(info, BUILDING_FARM) < wantR
                         && info.Wood >= ((info.Meat < 150) ? 80 : FARM_WOOD_GATE)) {   // ★食物告急→门槛放宽到 80，避免死锁
                         int gxp = m_centerX, gyp = m_centerY;
                         for (const tagBuilding& b : info.buildings)
@@ -1077,7 +1080,7 @@ void UsrAI::manageVillagers(const tagInfo& info)
                                     ? ((int)info.farmers.size() / 2) : 3;
                     if (farmWantV < FARM_MIN_COUNT) farmWantV = FARM_MIN_COUNT;
                     if (farmWantV > FARM_MAX_COUNT) farmWantV = FARM_MAX_COUNT;
-                    if (countBuilding(info, BUILDING_FARM) < farmWantV
+                    if (countBuildingAny(info, BUILDING_FARM) < farmWantV
                         && (!mapFoodLeft(info) || info.Meat < 200)
                         && info.Wood >= ((info.Meat < 150) ? 80 : FARM_WOOD_GATE)) {   // ★食物告急→门槛放宽到 80，避免死锁
                         int gxf = m_centerX, gyf = m_centerY;
@@ -1562,6 +1565,25 @@ bool UsrAI::canUpgradeBronze(const tagInfo& info) const
 //     ② 新生成的农民刚出生（IDLE）就被抓去建市场 → 不去采果/伐木
 //   现在：建造者正在忙 → 本帧跳过，等他建完当前建筑再接下一条（串行建造）
 // ============================================================
+// ============================================================
+// 【经济#2·子智能体分析】升级链（市场+靶场）没建好前，禁止花 120 木建仓库/谷仓 ✗
+//   引擎核对：工具→铜器**必须**已有 2 座（市场/靶场/马厩），即 市场150+兵营125+靶场150=425 木绕不过 ✓
+//   实测：f≈311 就抽走 120 木 + 1 个农民去建资源点仓库 → 抢在 425 木之前 ✗
+//     → 市场永远建不出 → canUpgradeBronze 永远 false → 中心无上限造农民(50 食/个) → 食物到不了 800 ✗✗
+//   放行条件：木头够整条链(≥425) 或 市场与靶场都已建成 ✓
+//   （谷仓开局地图就给了 1 个 ✓ 市场的前置已满足 ✓ 堵住不会卡住升级链 ✓）
+// ============================================================
+static bool depotAllowed(const tagInfo& info)
+{
+    if (info.Wood >= 425) return true;
+    int mkt = 0, rng = 0;
+    for (const tagBuilding& b : info.buildings) {
+        if (b.Type == BUILDING_MARKET) ++mkt;
+        else if (b.Type == BUILDING_RANGE) ++rng;
+    }
+    return (mkt > 0 && rng > 0);
+}
+
 void UsrAI::buildBuildings(const tagInfo& info)
 {
     // 找专职建造者：只有他"空闲且本帧没被下令"时才派活
@@ -1654,7 +1676,7 @@ void UsrAI::buildBuildings(const tagInfo& info)
             && countBuilding(info, BUILDING_HOME) >= 6
             && countBuilding(info, BUILDING_STOCK) < 3
             && info.civilizationStage >= CIVILIZATION_BRONZEAGE
-            && info.Wood >= BUILD_STOCK_WOOD) {
+            && info.Wood >= BUILD_STOCK_WOOD && depotAllowed(info)) {   // 【经济#2】升级链未完成前不建 ✗
             const tagResource* gold = nullptr;
             double gbest = 1e18;
             double cx = (double)m_centerX * BLOCKSIDELENGTH;
@@ -1721,7 +1743,7 @@ void UsrAI::buildBuildings(const tagInfo& info)
                     return;                     // 本帧只下这一条建造令
                 }
             } else if (countBuilding(info, BUILDING_GRANARY) == 0
-                       && info.Wood >= BUILD_GRANARY_WOOD) {
+                       && info.Wood >= BUILD_GRANARY_WOOD && depotAllowed(info)) {   // 【经济#2】同上
                 // 还没有谷仓（箭塔科技没地方研发）→ 先补一座谷仓
                 int gx2, gy2;
                 if (findBuildBlock(info, gx2, gy2, 3, 3)) {
@@ -1781,7 +1803,7 @@ void UsrAI::buildBuildings(const tagInfo& info)
         // round2#8 【修复·靶场建不出】科技不再是硬前置：第二波(13500)之后即便科技还没发起，
         //   也允许建第 2/3 座靶场（文档 71 行："8 分多一点两个靶场同时出兵"）
         if (!built && (m_researchCount[BUILDING_RANGE_UPGRADE_COMPOSITE_BOW] > 0
-                       || info.GameFrame >= FRAME_WAVE2)
+                       || info.GameFrame >= FRAME_WAVE2 - 3000)   // 【经济#8】9分钟→7分钟（文档71行：8分多两靶场）
             && countBuilding(info, BUILDING_RANGE) > 0
             && countBuilding(info, BUILDING_RANGE) < 3
             && info.Wood >= BUILD_RANGE_WOOD + 60) {
@@ -1876,7 +1898,7 @@ void UsrAI::buildResourceDepots(const tagInfo& info)
     //     若 600 帧后仍一个仓库都没有（建造者中途死亡等）→ 允许重下一次，避免永远没有打猎仓库
     bool needStock = (!m_preyStockDone && farPrey != nullptr && farPreyD > NEED_DIST
                       && countBuildingAny(info, BUILDING_STOCK) < 3
-                      && info.Wood >= BUILD_STOCK_WOOD);
+                      && info.Wood >= BUILD_STOCK_WOOD && depotAllowed(info));   // 【经济#2】同上
     if (m_preyStockDone) {
         bool anyStock = false;
         for (const tagBuilding& b : info.buildings)
@@ -1885,7 +1907,7 @@ void UsrAI::buildResourceDepots(const tagInfo& info)
     }
     bool needGranary = (farBush != nullptr && farBushD > NEED_DIST
                         && countBuildingAny(info, BUILDING_GRANARY) < 3
-                        && info.Wood >= BUILD_GRANARY_WOOD);
+                        && info.Wood >= BUILD_GRANARY_WOOD && depotAllowed(info));   // 【经济#2】同上
     // 没有任何要建的 + 没在役建造者 → 直接结束
     if (!needStock && !needGranary && m_depotBuilderSN < 0) return;
 
@@ -2040,7 +2062,9 @@ void UsrAI::researchTech(const tagInfo& info)
                                         || m_researchCount[BUILDING_RANGE_UPGRADE_COMPOSITE_BOW] > 0);
             // 工具使用（近战攻击+2）→ 金属加工（铜器，攻击再+2）
             int ut = m_researchCount[BUILDING_STOCK_UPGRADE_USETOOL];
-            if (ut == 0 && info.Meat >= BUILDING_STOCK_UPGRADE_CLOSER_ATTACK_FOOD) {
+            // 【经济#3】f≈11 就研究 100 食的"工具使用" = 白扔 2 个农民 ✗（前期不造兵，它只加近战攻击+2）
+    //   引擎核对：没有任何兵种/科技依赖它（阔剑/复合弓只依赖铜器）→ 推到铜器后再研究 ✓
+    if (bronze && ut == 0 && info.Meat >= BUILDING_STOCK_UPGRADE_CLOSER_ATTACK_FOOD) {
                 BuildingAction(b.SN, BUILDING_STOCK_UPGRADE_USETOOL);
                 m_issued.insert(b.SN);
                 m_researchCount[BUILDING_STOCK_UPGRADE_USETOOL]++;
@@ -4167,7 +4191,9 @@ void UsrAI::processData()
                     .arg(countBuilding(info, BUILDING_STABLE))
                     .arg(countBuilding(info, BUILDING_COLLAGE))
                     .arg(countBuilding(info, BUILDING_GRANARY));
-            line += QString(" | bld C%1 T%2 R%3 Fm%4 | scout done%5 unit%6 lost%7 bld%8 expl%9 siegeSN%10")                    .arg(m_scoutDone).arg(m_scoutUnitSN).arg(m_scoutLost)
+            line += QString(" | bld C%1 T%2 R%3 Fm%4 | scout done%5 unit%6 lost%7 bld%8 expl%9 siegeSN%10")
+                    .arg(centerCnt).arg(towerCnt).arg(rangeCnt).arg(farmCnt)   // ★修复：上次替换把这 4 个 .arg 弄丢 → 参数错位 4 位
+                    .arg(m_scoutDone).arg(m_scoutUnitSN).arg(m_scoutLost)
                     .arg(m_scoutBldSeen).arg(m_scoutExplPct).arg(m_siegeSN);
             line += QString(" | atk on%1 ph%2 rally %3,%4 tgt %5,%6")
                     .arg(m_atkOn).arg(m_atkPhase).arg(m_atkRallyX).arg(m_atkRallyY)
