@@ -1,0 +1,110 @@
+{
+  "version": "V98",
+  "series": "legacy",
+  "title": "简化收尾护送与转换",
+  "changes": [
+    "删除收尾中额外护卫数量、血量和环形站位限制。",
+    "持续拆塔，实际塔火有人承担时祭司沿可达路线接近工厂；转换开始后保持。"
+  ],
+  "result_summary": "原批 4 局 3 胜；与原样复测合计 8 局：4 胜、3 超时、1 祭司阵亡。",
+  "status": "历史对照",
+  "path": "versions/legacy/V98",
+  "source_sha256": {
+    "UsrAI.cpp": "75363D268A862EBF083578E6C100B08CFF2C0C902A62A8DFE2D75A69D52F60D9",
+    "UsrAI.h": "A5898346B6147C320471D722E64566C1C1F00D16BB992F4CABA5BF8E135FE4BE"
+  },
+  "historical_evidence": [
+    "v98_source_hashes.json",
+    "v98阶段说明.md"
+  ],
+  "test_details": {
+    "statistics": {
+      "win": 4,
+      "timeout": 3,
+      "priest_dead": 1
+    },
+    "games": [
+      {
+        "map": "map1",
+        "rotation": 0,
+        "normal_end": true,
+        "classification": "timeout",
+        "frame": 45000,
+        "win": false,
+        "game_seconds": 1800.0,
+        "score": 509
+      },
+      {
+        "map": "map2",
+        "rotation": 180,
+        "normal_end": true,
+        "classification": "win",
+        "frame": 43414,
+        "win": true,
+        "game_seconds": 1736.56,
+        "score": 594
+      },
+      {
+        "map": "map3",
+        "rotation": 270,
+        "normal_end": true,
+        "classification": "win",
+        "frame": 38921,
+        "win": true,
+        "game_seconds": 1556.84,
+        "score": 542
+      },
+      {
+        "map": "map",
+        "rotation": 90,
+        "normal_end": true,
+        "classification": "win",
+        "frame": 36598,
+        "win": true,
+        "game_seconds": 1463.92,
+        "score": 513
+      },
+      {
+        "map": "map1",
+        "rotation": 0,
+        "normal_end": true,
+        "classification": "timeout",
+        "frame": 45000,
+        "win": false,
+        "game_seconds": 1800.0,
+        "score": 350
+      },
+      {
+        "map": "map2",
+        "rotation": 180,
+        "normal_end": true,
+        "classification": "win",
+        "frame": 42642,
+        "win": true,
+        "game_seconds": 1705.68,
+        "score": 580
+      },
+      {
+        "map": "map3",
+        "rotation": 270,
+        "normal_end": true,
+        "classification": "priest_dead",
+        "frame": 41457,
+        "win": false,
+        "game_seconds": 1658.28,
+        "score": 523
+      },
+      {
+        "map": "map",
+        "rotation": 90,
+        "normal_end": true,
+        "classification": "timeout",
+        "frame": 45000,
+        "win": false,
+        "game_seconds": 1800.0,
+        "score": 370
+      }
+    ]
+  },
+  "archived_on": "2026-10-13"
+}
