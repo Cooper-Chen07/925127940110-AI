@@ -1,0 +1,22 @@
+{
+  "version": "R49",
+  "series": "rewrite",
+  "title": "保持有效远程攻击目标实验",
+  "changes": [
+    "尝试保留射程内的有效远程攻击目标，减少重选目标与指令中断；保留祭司保护优先级。"
+  ],
+  "result_summary": "本地定向 2 局 1 胜、1 祭司阵亡；未提交 OJ，未替代 R48。",
+  "status": "未采纳",
+  "path": "versions/rewrite/R49",
+  "source_sha256": {
+    "UsrAI.cpp": "AFB725D5B12F4A491609DA0D19A550D03387B9217E747B777F7AA413CF2AB162",
+    "UsrAI.h": "A353A87CED1BDBA0729E5167C18BDD85B737695B1F8CF4F0689746604897D3B0"
+  },
+  "historical_evidence": [
+    "manifest.json",
+    "策略与验证.md"
+  ],
+  "test_details": {},
+  "archived_on": "2026-10-13",
+  "historical_date": "2026-10-08"
+}
