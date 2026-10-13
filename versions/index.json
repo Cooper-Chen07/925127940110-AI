@@ -1,0 +1,802 @@
+{
+  "archived_on": "2026-10-13",
+  "versions": [
+    {
+      "version": "V18",
+      "series": "legacy",
+      "title": "农田建造任务与指令去重",
+      "changes": [
+        "跨帧登记尚未出现地基的农田任务，减少建田指令被重新派工打断。",
+        "增加同帧调度去重，并检查行军后排实际到位。"
+      ],
+      "result_summary": "Release 构建通过；50 项反攻与 10 项建田场景检查通过，未据此认定整局稳定。",
+      "status": "历史修复",
+      "path": "versions/legacy/V18",
+      "source_sha256": {
+        "UsrAI.cpp": "378F6824F536A230FC997D1E742E43EE1B0D81791C803450072B029269F879FF",
+        "UsrAI.h": "C0F0110B614AF8661004F4E65B893FD46D54AA9CE10FE18666C19D8D249A2C55"
+      },
+      "historical_evidence": [
+        "v18_source_hashes.json",
+        "排查记录.md"
+      ],
+      "test_details": {},
+      "archived_on": "2026-10-13",
+      "historical_date": "2026-10-05"
+    },
+    {
+      "version": "V24",
+      "series": "legacy",
+      "title": "早期防守与反攻对照",
+      "changes": [
+        "保留原样历史防守与反攻策略，供同引擎复测比较。"
+      ],
+      "result_summary": "两轮共 8 局：3 胜、4 超时、1 祭司阵亡；未稳定通关。",
+      "status": "历史对照",
+      "path": "versions/legacy/V24",
+      "source_sha256": {
+        "UsrAI.cpp": "9EEF6589CF6E976B993038DBF73AA85BBCF7CBD5A84E15A3CFCF8D5FDB2EDE9C",
+        "UsrAI.h": "C0F0110B614AF8661004F4E65B893FD46D54AA9CE10FE18666C19D8D249A2C55"
+      },
+      "historical_evidence": [
+        "v24_source_hashes.json",
+        "v24_v98复测比较_20261007.md"
+      ],
+      "test_details": {
+        "statistics": {
+          "win": 3,
+          "timeout": 4,
+          "priest_dead": 1
+        },
+        "games": [
+          {
+            "map": "map1",
+            "rotation": 0,
+            "normal_end": true,
+            "classification": "win",
+            "frame": 44083,
+            "win": true,
+            "game_seconds": 1763.32,
+            "score": 583
+          },
+          {
+            "map": "map2",
+            "rotation": 180,
+            "normal_end": true,
+            "classification": "win",
+            "frame": 34799,
+            "win": true,
+            "game_seconds": 1391.96,
+            "score": 494
+          },
+          {
+            "map": "map3",
+            "rotation": 270,
+            "normal_end": true,
+            "classification": "win",
+            "frame": 38360,
+            "win": true,
+            "game_seconds": 1534.4,
+            "score": 511
+          },
+          {
+            "map": "map",
+            "rotation": 90,
+            "normal_end": true,
+            "classification": "timeout",
+            "frame": 45000,
+            "win": false,
+            "game_seconds": 1800.0,
+            "score": 596
+          },
+          {
+            "map": "map1",
+            "rotation": 0,
+            "normal_end": true,
+            "classification": "timeout",
+            "frame": 45000,
+            "win": false,
+            "game_seconds": 1800.0,
+            "score": 525
+          },
+          {
+            "map": "map2",
+            "rotation": 180,
+            "normal_end": true,
+            "classification": "priest_dead",
+            "frame": 31055,
+            "win": false,
+            "game_seconds": 1242.2,
+            "score": 357
+          },
+          {
+            "map": "map3",
+            "rotation": 270,
+            "normal_end": true,
+            "classification": "timeout",
+            "frame": 45000,
+            "win": false,
+            "game_seconds": 1800.0,
+            "score": 529
+          },
+          {
+            "map": "map",
+            "rotation": 90,
+            "normal_end": true,
+            "classification": "timeout",
+            "frame": 45000,
+            "win": false,
+            "game_seconds": 1800.0,
+            "score": 581
+          }
+        ]
+      },
+      "archived_on": "2026-10-13"
+    },
+    {
+      "version": "V64",
+      "series": "legacy",
+      "title": "备用选田与收尾塔火掩护",
+      "changes": [
+        "备用选田遵守不可达目标冷却。",
+        "收尾计入实际塔火掩护单位并保留其动作，补充空闲农民诊断。"
+      ],
+      "result_summary": "首轮完整 2 局：1 超时、1 祭司阵亡；主动停止的复跑不计入胜负。",
+      "status": "局部修复",
+      "path": "versions/legacy/V64",
+      "source_sha256": {
+        "UsrAI.cpp": "24B97567C1634FA54050982B86151FC0CD22DBB7629EFF4FEA3F68BC5B0AD63F",
+        "UsrAI.h": "A5898346B6147C320471D722E64566C1C1F00D16BB992F4CABA5BF8E135FE4BE"
+      },
+      "historical_evidence": [
+        "v64_source_hashes.json",
+        "本轮调试交接_v64_20261006.md"
+      ],
+      "test_details": {
+        "games": [
+          {
+            "map": "map2",
+            "rotation": 180,
+            "normal_end": true,
+            "classification": "priest_dead",
+            "frame": 42355,
+            "win": false,
+            "game_seconds": 1694.2,
+            "score": 537
+          },
+          {
+            "map": "map",
+            "rotation": 90,
+            "normal_end": true,
+            "classification": "timeout",
+            "frame": 45000,
+            "win": false,
+            "game_seconds": 1800.0,
+            "score": 503
+          }
+        ]
+      },
+      "archived_on": "2026-10-13"
+    },
+    {
+      "version": "V94",
+      "series": "legacy",
+      "title": "住房建造者接替与持续射击",
+      "changes": [
+        "承接 V93 的不可达工地及施工停滞建造者接替。",
+        "减少非紧急走位打断弓兵射程内攻击，保留必要避险。"
+      ],
+      "result_summary": "四图 4 局：2 胜、2 超时；未证实稳定性提升。",
+      "status": "局部修复",
+      "path": "versions/legacy/V94",
+      "source_sha256": {
+        "UsrAI.cpp": "6A560E87CE6D837304CDFD87B1DFC07EEFB4A9D4435A0B3607923389697792BF",
+        "UsrAI.h": "A5898346B6147C320471D722E64566C1C1F00D16BB992F4CABA5BF8E135FE4BE"
+      },
+      "historical_evidence": [
+        "v94_source_hashes.json",
+        "v94阶段说明.md"
+      ],
+      "test_details": {
+        "games": [
+          {
+            "map": "map1",
+            "rotation": 0,
+            "normal_end": true,
+            "classification": "timeout",
+            "frame": 45000,
+            "win": false,
+            "game_seconds": 1800.0,
+            "score": 543
+          },
+          {
+            "map": "map2",
+            "rotation": 180,
+            "normal_end": true,
+            "classification": "win",
+            "frame": 36339,
+            "win": true,
+            "game_seconds": 1453.56,
+            "score": 524
+          },
+          {
+            "map": "map3",
+            "rotation": 270,
+            "normal_end": true,
+            "classification": "timeout",
+            "frame": 45000,
+            "win": false,
+            "game_seconds": 1800.0,
+            "score": 516
+          },
+          {
+            "map": "map",
+            "rotation": 90,
+            "normal_end": true,
+            "classification": "win",
+            "frame": 41678,
+            "win": true,
+            "game_seconds": 1667.12,
+            "score": 610
+          }
+        ]
+      },
+      "archived_on": "2026-10-13"
+    },
+    {
+      "version": "V98",
+      "series": "legacy",
+      "title": "简化收尾护送与转换",
+      "changes": [
+        "删除收尾中额外护卫数量、血量和环形站位限制。",
+        "持续拆塔，实际塔火有人承担时祭司沿可达路线接近工厂；转换开始后保持。"
+      ],
+      "result_summary": "原批 4 局 3 胜；与原样复测合计 8 局：4 胜、3 超时、1 祭司阵亡。",
+      "status": "历史对照",
+      "path": "versions/legacy/V98",
+      "source_sha256": {
+        "UsrAI.cpp": "75363D268A862EBF083578E6C100B08CFF2C0C902A62A8DFE2D75A69D52F60D9",
+        "UsrAI.h": "A5898346B6147C320471D722E64566C1C1F00D16BB992F4CABA5BF8E135FE4BE"
+      },
+      "historical_evidence": [
+        "v98_source_hashes.json",
+        "v98阶段说明.md"
+      ],
+      "test_details": {
+        "statistics": {
+          "win": 4,
+          "timeout": 3,
+          "priest_dead": 1
+        },
+        "games": [
+          {
+            "map": "map1",
+            "rotation": 0,
+            "normal_end": true,
+            "classification": "timeout",
+            "frame": 45000,
+            "win": false,
+            "game_seconds": 1800.0,
+            "score": 509
+          },
+          {
+            "map": "map2",
+            "rotation": 180,
+            "normal_end": true,
+            "classification": "win",
+            "frame": 43414,
+            "win": true,
+            "game_seconds": 1736.56,
+            "score": 594
+          },
+          {
+            "map": "map3",
+            "rotation": 270,
+            "normal_end": true,
+            "classification": "win",
+            "frame": 38921,
+            "win": true,
+            "game_seconds": 1556.84,
+            "score": 542
+          },
+          {
+            "map": "map",
+            "rotation": 90,
+            "normal_end": true,
+            "classification": "win",
+            "frame": 36598,
+            "win": true,
+            "game_seconds": 1463.92,
+            "score": 513
+          },
+          {
+            "map": "map1",
+            "rotation": 0,
+            "normal_end": true,
+            "classification": "timeout",
+            "frame": 45000,
+            "win": false,
+            "game_seconds": 1800.0,
+            "score": 350
+          },
+          {
+            "map": "map2",
+            "rotation": 180,
+            "normal_end": true,
+            "classification": "win",
+            "frame": 42642,
+            "win": true,
+            "game_seconds": 1705.68,
+            "score": 580
+          },
+          {
+            "map": "map3",
+            "rotation": 270,
+            "normal_end": true,
+            "classification": "priest_dead",
+            "frame": 41457,
+            "win": false,
+            "game_seconds": 1658.28,
+            "score": 523
+          },
+          {
+            "map": "map",
+            "rotation": 90,
+            "normal_end": true,
+            "classification": "timeout",
+            "frame": 45000,
+            "win": false,
+            "game_seconds": 1800.0,
+            "score": 370
+          }
+        ]
+      },
+      "archived_on": "2026-10-13"
+    },
+    {
+      "version": "V107",
+      "series": "legacy",
+      "title": "清场解除等兵与实际塔火掩护",
+      "changes": [
+        "清场后解除旧撤退等兵限制。",
+        "沿途塔实际锁定正在攻击且处于射程内的活友军时，允许祭司接近工厂。"
+      ],
+      "result_summary": "四图 4 局：2 胜、2 超时，无祭司阵亡；仍存在推进与转换停滞。",
+      "status": "局部修复",
+      "path": "versions/legacy/V107",
+      "source_sha256": {
+        "UsrAI.cpp": "4E91E062A3432D89DF442FAB381CCAC1E523828767DA33A4C973DDF0BEBBC3E0",
+        "UsrAI.h": "A5898346B6147C320471D722E64566C1C1F00D16BB992F4CABA5BF8E135FE4BE"
+      },
+      "historical_evidence": [
+        "v107_source_hashes.json",
+        "v107阶段说明.md"
+      ],
+      "test_details": {
+        "games": [
+          {
+            "map": "map1",
+            "rotation": 0,
+            "normal_end": true,
+            "classification": "timeout",
+            "frame": 45000,
+            "win": false,
+            "game_seconds": 1800.0,
+            "score": 584
+          },
+          {
+            "map": "map2",
+            "rotation": 180,
+            "normal_end": true,
+            "classification": "win",
+            "frame": 42926,
+            "win": true,
+            "game_seconds": 1717.04,
+            "score": 610
+          },
+          {
+            "map": "map3",
+            "rotation": 270,
+            "normal_end": true,
+            "classification": "timeout",
+            "frame": 45000,
+            "win": false,
+            "game_seconds": 1800.0,
+            "score": 505
+          },
+          {
+            "map": "map",
+            "rotation": 90,
+            "normal_end": true,
+            "classification": "win",
+            "frame": 41556,
+            "win": true,
+            "game_seconds": 1662.24,
+            "score": 566
+          }
+        ]
+      },
+      "archived_on": "2026-10-13"
+    },
+    {
+      "version": "V118",
+      "series": "legacy",
+      "title": "连续收尾入口条件",
+      "changes": [
+        "要求当前视野内有活箭塔、工厂已探明，且连续 10 秒无可见活敌军。",
+        "接近途中遇敌返回交战，已进入真实转换距离的施法保持。"
+      ],
+      "result_summary": "四图 4 局：2 胜、1 超时、1 祭司阵亡；V119 退步后回退至此版。",
+      "status": "历史回退基线",
+      "path": "versions/legacy/V118",
+      "source_sha256": {
+        "UsrAI.cpp": "F3EACBF98E5D8CE696ED9C8F6DC67CA8225BD8A2BF2ECB700B3D368F0A224885",
+        "UsrAI.h": "A5898346B6147C320471D722E64566C1C1F00D16BB992F4CABA5BF8E135FE4BE"
+      },
+      "historical_evidence": [
+        "v118_source_hashes.json",
+        "v118阶段说明.md"
+      ],
+      "test_details": {
+        "games": [
+          {
+            "map": "map1",
+            "rotation": 0,
+            "normal_end": true,
+            "classification": "win",
+            "frame": 43849,
+            "win": true,
+            "game_seconds": 1753.96,
+            "score": 554
+          },
+          {
+            "map": "map2",
+            "rotation": 180,
+            "normal_end": true,
+            "classification": "timeout",
+            "frame": 45000,
+            "win": false,
+            "game_seconds": 1800.0,
+            "score": 616
+          },
+          {
+            "map": "map3",
+            "rotation": 270,
+            "normal_end": true,
+            "classification": "priest_dead",
+            "frame": 43540,
+            "win": false,
+            "game_seconds": 1741.6,
+            "score": 503
+          },
+          {
+            "map": "map",
+            "rotation": 90,
+            "normal_end": true,
+            "classification": "win",
+            "frame": 36701,
+            "win": true,
+            "game_seconds": 1468.04,
+            "score": 550
+          }
+        ]
+      },
+      "archived_on": "2026-10-13"
+    },
+    {
+      "version": "V119",
+      "series": "legacy",
+      "title": "推进重整与收尾简化实验",
+      "changes": [
+        "尝试统一主力推进点与攻击目标，简化重整及收尾接管。"
+      ],
+      "result_summary": "四图 4 局全部祭司阵亡；另一次异常退出不计入自然结果，拒用并回退 V118。",
+      "status": "未采纳",
+      "path": "versions/legacy/V119",
+      "source_sha256": {
+        "UsrAI.cpp": "CE7A8088D0EE32D5D4465562FF968A6488DFFC3F572E1350B59655DDD51D0D82",
+        "UsrAI.h": "A5898346B6147C320471D722E64566C1C1F00D16BB992F4CABA5BF8E135FE4BE"
+      },
+      "historical_evidence": [
+        "v119_source_hashes.json",
+        "v119回退v118记录.md"
+      ],
+      "test_details": {
+        "games": [
+          {
+            "map": "map1",
+            "rotation": 0,
+            "normal_end": true,
+            "classification": "priest_dead",
+            "frame": 39536,
+            "win": false,
+            "game_seconds": 1581.44,
+            "score": 379
+          },
+          {
+            "map": "map2",
+            "rotation": 180,
+            "normal_end": true,
+            "classification": "priest_dead",
+            "frame": 31793,
+            "win": false,
+            "game_seconds": 1271.72,
+            "score": 483
+          },
+          {
+            "map": "map3",
+            "rotation": 270,
+            "normal_end": true,
+            "classification": "priest_dead",
+            "frame": 37980,
+            "win": false,
+            "game_seconds": 1519.2,
+            "score": 503
+          },
+          {
+            "map": "map",
+            "rotation": 90,
+            "normal_end": true,
+            "classification": "priest_dead",
+            "frame": 30967,
+            "win": false,
+            "game_seconds": 1238.68,
+            "score": 417
+          }
+        ]
+      },
+      "archived_on": "2026-10-13"
+    },
+    {
+      "version": "R14",
+      "series": "rewrite",
+      "title": "重写后首次本地胜利",
+      "changes": [
+        "以统一 Strategy 状态和指令执行层重写经济、防守、推进与祭司转换链路。"
+      ],
+      "result_summary": "确认一次本地正常获胜，34279 帧；仅为首胜，更多地图尚待验证。",
+      "status": "首胜节点",
+      "path": "versions/rewrite/R14",
+      "source_sha256": {
+        "UsrAI.cpp": "FB2707F4272B30B12A0A815603A9A03D692119A3947EB57AAE8DF9FE01F05E9E",
+        "UsrAI.h": "A353A87CED1BDBA0729E5167C18BDD85B737695B1F8CF4F0689746604897D3B0"
+      },
+      "historical_evidence": [
+        "validation.json",
+        "策略与验证.md"
+      ],
+      "test_details": {},
+      "archived_on": "2026-10-13",
+      "historical_date": "2026-10-08"
+    },
+    {
+      "version": "R20",
+      "series": "rewrite",
+      "title": "可达撤退与多地图验证",
+      "changes": [
+        "在重写策略中完善按已探索地形选择可达撤退位置，并验证第二类地图。"
+      ],
+      "result_summary": "当时确认 2 次本地胜利；标准 Release 与更广地图验证尚待完成。",
+      "status": "阶段节点",
+      "path": "versions/rewrite/R20",
+      "source_sha256": {
+        "UsrAI.cpp": "8391FAB6CEBD266D15339A417017DCD942C94EE836BCE433B06805A5FC663C2E",
+        "UsrAI.h": "A353A87CED1BDBA0729E5167C18BDD85B737695B1F8CF4F0689746604897D3B0"
+      },
+      "historical_evidence": [
+        "manifest.json",
+        "策略与验证.md"
+      ],
+      "test_details": {},
+      "archived_on": "2026-10-13",
+      "historical_date": "2026-10-08"
+    },
+    {
+      "version": "R29",
+      "series": "rewrite",
+      "title": "施工停滞与无效治疗恢复",
+      "changes": [
+        "检测施工无进展，暂缓失败地基并更换建造者。",
+        "食物断供时优先补农田；治疗无进展时选择伤兵旁空位重新接近。"
+      ],
+      "result_summary": "本地定向 2 局：1 胜、1 祭司阵亡；未稳定。",
+      "status": "局部修复",
+      "path": "versions/rewrite/R29",
+      "source_sha256": {
+        "UsrAI.cpp": "67360E043CC32C66004BFCBC27BA148D5E815E90AEBC01526A0D949C70E01D6F",
+        "UsrAI.h": "A353A87CED1BDBA0729E5167C18BDD85B737695B1F8CF4F0689746604897D3B0"
+      },
+      "historical_evidence": [
+        "manifest.json",
+        "策略与验证.md"
+      ],
+      "test_details": {},
+      "archived_on": "2026-10-13",
+      "historical_date": "2026-10-08"
+    },
+    {
+      "version": "R30",
+      "series": "rewrite",
+      "title": "建造选址与反攻基线",
+      "changes": [
+        "扩大建筑选址范围，第二靶场失败时继续处理农田，减少科技预算阻塞建设。",
+        "兵力不足时沿已走路线重整，并重新检查祭司返回点是否处于敌军射程内。"
+      ],
+      "result_summary": "初轮 MAX 速度四图四旋转 15 胜、1 崩溃；其后两次普通 OJ 均超时。不同速度批次分开统计。",
+      "status": "重写对照基线",
+      "path": "versions/rewrite/R30",
+      "source_sha256": {
+        "UsrAI.cpp": "F55E72378AB6F572A8D55EAEB6868410BB8761A894AF9E69EF7E9AF264C73736",
+        "UsrAI.h": "A353A87CED1BDBA0729E5167C18BDD85B737695B1F8CF4F0689746604897D3B0"
+      },
+      "historical_evidence": [
+        "manifest.json",
+        "策略与验证.md"
+      ],
+      "test_details": {},
+      "archived_on": "2026-10-13",
+      "historical_date": "2026-10-08"
+    },
+    {
+      "version": "R48",
+      "series": "rewrite",
+      "title": "指令空主体补回与 OJ 对齐",
+      "changes": [
+        "保留 R30 主要策略及运行诊断。",
+        "提交前仅在 command.self 为空且 SN 仍对应有效对象时补回主体，不改写有效指针或引擎。"
+      ],
+      "result_summary": "本地 10 倍四图四旋转 16/16 获胜；普通 OJ 同源码 8/8 获胜。有限样本不保证未来全部通过。",
+      "status": "推荐基线",
+      "path": "versions/rewrite/R48",
+      "source_sha256": {
+        "UsrAI.cpp": "9E0E6EFF3FE69EE498A816945DAD1B8A890115E129104252D7FA036B3A0A68AD",
+        "UsrAI.h": "A353A87CED1BDBA0729E5167C18BDD85B737695B1F8CF4F0689746604897D3B0"
+      },
+      "historical_evidence": [
+        "manifest.json",
+        "OJ对齐20261008.md"
+      ],
+      "test_details": {
+        "local_completed": 16,
+        "local_wins": 16,
+        "oj_completed": 8,
+        "oj_wins": 8,
+        "local_frequency": 10,
+        "oj_cases_are_not_a_full_16_case_matrix": true
+      },
+      "archived_on": "2026-10-13",
+      "historical_date": "2026-10-08"
+    },
+    {
+      "version": "R49",
+      "series": "rewrite",
+      "title": "保持有效远程攻击目标实验",
+      "changes": [
+        "尝试保留射程内的有效远程攻击目标，减少重选目标与指令中断；保留祭司保护优先级。"
+      ],
+      "result_summary": "本地定向 2 局 1 胜、1 祭司阵亡；未提交 OJ，未替代 R48。",
+      "status": "未采纳",
+      "path": "versions/rewrite/R49",
+      "source_sha256": {
+        "UsrAI.cpp": "AFB725D5B12F4A491609DA0D19A550D03387B9217E747B777F7AA413CF2AB162",
+        "UsrAI.h": "A353A87CED1BDBA0729E5167C18BDD85B737695B1F8CF4F0689746604897D3B0"
+      },
+      "historical_evidence": [
+        "manifest.json",
+        "策略与验证.md"
+      ],
+      "test_details": {},
+      "archived_on": "2026-10-13",
+      "historical_date": "2026-10-08"
+    },
+    {
+      "version": "R50",
+      "series": "rewrite",
+      "title": "去日志单局对照",
+      "changes": [
+        "仅去除 AI 新增诊断日志及相应诊断状态，保留策略、回执处理与空主体补回修复。"
+      ],
+      "result_summary": "仅一次普通 OJ 获胜，36108 帧；未跑本地矩阵，不能推广长期胜率，之后恢复 R48。",
+      "status": "单局对照",
+      "path": "versions/rewrite/R50",
+      "source_sha256": {
+        "UsrAI.cpp": "1BAAF07ED5A8D75DE5EC2836D4D3F3487608F798ED2421671F916101B4F35D0C",
+        "UsrAI.h": "A353A87CED1BDBA0729E5167C18BDD85B737695B1F8CF4F0689746604897D3B0"
+      },
+      "historical_evidence": [
+        "manifest.json",
+        "去日志单局对照20261008.md"
+      ],
+      "test_details": {},
+      "archived_on": "2026-10-13",
+      "historical_date": "2026-10-08"
+    },
+    {
+      "version": "PB1",
+      "series": "purebow",
+      "title": "纯复合弓独立分支",
+      "changes": [
+        "只主动训练复合弓，前排护卫由祭司转换敌兵补充。",
+        "取消原 15 分 20 秒最早出击门槛，按第二波后安全状态与兵力集结。"
+      ],
+      "result_summary": "仅本地 map/0° 与 map2/0° 两局获胜；未提交 OJ，未完成四图四旋转验证。",
+      "status": "实验分支",
+      "path": "versions/purebow/PB1",
+      "source_sha256": {
+        "UsrAI.cpp": "82A3914D27D1C772F4CFCCA43B559F8A1F0E15347E2FD4E166D9B59DC4F557B4",
+        "UsrAI.h": "A353A87CED1BDBA0729E5167C18BDD85B737695B1F8CF4F0689746604897D3B0"
+      },
+      "historical_evidence": [
+        "pb1_summary.json",
+        "manifest.json"
+      ],
+      "test_details": {
+        "games": [
+          {
+            "map": "map",
+            "rotation": 0,
+            "normalEnd": true,
+            "win": true,
+            "frame": 33867,
+            "gameSeconds": 1354.68
+          },
+          {
+            "map": "map2",
+            "rotation": 0,
+            "normalEnd": true,
+            "win": true,
+            "frame": 32707,
+            "gameSeconds": 1308.28
+          }
+        ],
+        "oj_tested": false
+      },
+      "archived_on": "2026-10-13",
+      "historical_date": "2026-10-08"
+    },
+    {
+      "version": "PB13",
+      "series": "purebow",
+      "title": "纯复合弓后续冻结候选",
+      "changes": [
+        "继续调整木材、黄金与天然食物派工及建造供兵衔接。",
+        "结合目标血量与数量追踪采集进展，避开边界活羚羊。",
+        "改进祭司移动停滞恢复和投石威胁判断，保留 R48 空主体补回。"
+      ],
+      "result_summary": "仅本地 map/0° 与 map2/0° 两局获胜；未提交 OJ，未完成四图四旋转验证。",
+      "status": "实验分支",
+      "path": "versions/purebow/PB13",
+      "source_sha256": {
+        "UsrAI.cpp": "7FB43CA5E8C328BA8FE3C806D7427131570DF0A6A06452C4255EC9CB34D6DA35",
+        "UsrAI.h": "A353A87CED1BDBA0729E5167C18BDD85B737695B1F8CF4F0689746604897D3B0"
+      },
+      "historical_evidence": [
+        "pb13_summary.json",
+        "manifest.json"
+      ],
+      "test_details": {
+        "games": [
+          {
+            "map": "map",
+            "rotation": 0,
+            "normalEnd": true,
+            "win": true,
+            "frame": 32185,
+            "gameSeconds": 1287.4
+          },
+          {
+            "map": "map2",
+            "rotation": 0,
+            "normalEnd": true,
+            "win": true,
+            "frame": 35814,
+            "gameSeconds": 1432.56
+          }
+        ],
+        "oj_tested": false
+      },
+      "archived_on": "2026-10-13",
+      "historical_date": "2026-10-08"
+    }
+  ]
+}
