@@ -1,0 +1,22 @@
+{
+  "version": "R14",
+  "series": "rewrite",
+  "title": "重写后首次本地胜利",
+  "changes": [
+    "以统一 Strategy 状态和指令执行层重写经济、防守、推进与祭司转换链路。"
+  ],
+  "result_summary": "确认一次本地正常获胜，34279 帧；仅为首胜，更多地图尚待验证。",
+  "status": "首胜节点",
+  "path": "versions/rewrite/R14",
+  "source_sha256": {
+    "UsrAI.cpp": "FB2707F4272B30B12A0A815603A9A03D692119A3947EB57AAE8DF9FE01F05E9E",
+    "UsrAI.h": "A353A87CED1BDBA0729E5167C18BDD85B737695B1F8CF4F0689746604897D3B0"
+  },
+  "historical_evidence": [
+    "validation.json",
+    "策略与验证.md"
+  ],
+  "test_details": {},
+  "archived_on": "2026-10-13",
+  "historical_date": "2026-10-08"
+}
