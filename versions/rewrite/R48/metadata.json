@@ -1,0 +1,30 @@
+{
+  "version": "R48",
+  "series": "rewrite",
+  "title": "指令空主体补回与 OJ 对齐",
+  "changes": [
+    "保留 R30 主要策略及运行诊断。",
+    "提交前仅在 command.self 为空且 SN 仍对应有效对象时补回主体，不改写有效指针或引擎。"
+  ],
+  "result_summary": "本地 10 倍四图四旋转 16/16 获胜；普通 OJ 同源码 8/8 获胜。有限样本不保证未来全部通过。",
+  "status": "推荐基线",
+  "path": "versions/rewrite/R48",
+  "source_sha256": {
+    "UsrAI.cpp": "9E0E6EFF3FE69EE498A816945DAD1B8A890115E129104252D7FA036B3A0A68AD",
+    "UsrAI.h": "A353A87CED1BDBA0729E5167C18BDD85B737695B1F8CF4F0689746604897D3B0"
+  },
+  "historical_evidence": [
+    "manifest.json",
+    "OJ对齐20261008.md"
+  ],
+  "test_details": {
+    "local_completed": 16,
+    "local_wins": 16,
+    "oj_completed": 8,
+    "oj_wins": 8,
+    "local_frequency": 10,
+    "oj_cases_are_not_a_full_16_case_matrix": true
+  },
+  "archived_on": "2026-10-13",
+  "historical_date": "2026-10-08"
+}
