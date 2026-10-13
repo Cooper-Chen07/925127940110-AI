@@ -1,0 +1,23 @@
+{
+  "version": "R29",
+  "series": "rewrite",
+  "title": "施工停滞与无效治疗恢复",
+  "changes": [
+    "检测施工无进展，暂缓失败地基并更换建造者。",
+    "食物断供时优先补农田；治疗无进展时选择伤兵旁空位重新接近。"
+  ],
+  "result_summary": "本地定向 2 局：1 胜、1 祭司阵亡；未稳定。",
+  "status": "局部修复",
+  "path": "versions/rewrite/R29",
+  "source_sha256": {
+    "UsrAI.cpp": "67360E043CC32C66004BFCBC27BA148D5E815E90AEBC01526A0D949C70E01D6F",
+    "UsrAI.h": "A353A87CED1BDBA0729E5167C18BDD85B737695B1F8CF4F0689746604897D3B0"
+  },
+  "historical_evidence": [
+    "manifest.json",
+    "策略与验证.md"
+  ],
+  "test_details": {},
+  "archived_on": "2026-10-13",
+  "historical_date": "2026-10-08"
+}
