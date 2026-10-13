@@ -1,0 +1,22 @@
+{
+  "version": "R50",
+  "series": "rewrite",
+  "title": "去日志单局对照",
+  "changes": [
+    "仅去除 AI 新增诊断日志及相应诊断状态，保留策略、回执处理与空主体补回修复。"
+  ],
+  "result_summary": "仅一次普通 OJ 获胜，36108 帧；未跑本地矩阵，不能推广长期胜率，之后恢复 R48。",
+  "status": "单局对照",
+  "path": "versions/rewrite/R50",
+  "source_sha256": {
+    "UsrAI.cpp": "1BAAF07ED5A8D75DE5EC2836D4D3F3487608F798ED2421671F916101B4F35D0C",
+    "UsrAI.h": "A353A87CED1BDBA0729E5167C18BDD85B737695B1F8CF4F0689746604897D3B0"
+  },
+  "historical_evidence": [
+    "manifest.json",
+    "去日志单局对照20261008.md"
+  ],
+  "test_details": {},
+  "archived_on": "2026-10-13",
+  "historical_date": "2026-10-08"
+}
