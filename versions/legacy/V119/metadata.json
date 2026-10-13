@@ -1,0 +1,64 @@
+{
+  "version": "V119",
+  "series": "legacy",
+  "title": "推进重整与收尾简化实验",
+  "changes": [
+    "尝试统一主力推进点与攻击目标，简化重整及收尾接管。"
+  ],
+  "result_summary": "四图 4 局全部祭司阵亡；另一次异常退出不计入自然结果，拒用并回退 V118。",
+  "status": "未采纳",
+  "path": "versions/legacy/V119",
+  "source_sha256": {
+    "UsrAI.cpp": "CE7A8088D0EE32D5D4465562FF968A6488DFFC3F572E1350B59655DDD51D0D82",
+    "UsrAI.h": "A5898346B6147C320471D722E64566C1C1F00D16BB992F4CABA5BF8E135FE4BE"
+  },
+  "historical_evidence": [
+    "v119_source_hashes.json",
+    "v119回退v118记录.md"
+  ],
+  "test_details": {
+    "games": [
+      {
+        "map": "map1",
+        "rotation": 0,
+        "normal_end": true,
+        "classification": "priest_dead",
+        "frame": 39536,
+        "win": false,
+        "game_seconds": 1581.44,
+        "score": 379
+      },
+      {
+        "map": "map2",
+        "rotation": 180,
+        "normal_end": true,
+        "classification": "priest_dead",
+        "frame": 31793,
+        "win": false,
+        "game_seconds": 1271.72,
+        "score": 483
+      },
+      {
+        "map": "map3",
+        "rotation": 270,
+        "normal_end": true,
+        "classification": "priest_dead",
+        "frame": 37980,
+        "win": false,
+        "game_seconds": 1519.2,
+        "score": 503
+      },
+      {
+        "map": "map",
+        "rotation": 90,
+        "normal_end": true,
+        "classification": "priest_dead",
+        "frame": 30967,
+        "win": false,
+        "game_seconds": 1238.68,
+        "score": 417
+      }
+    ]
+  },
+  "archived_on": "2026-10-13"
+}
