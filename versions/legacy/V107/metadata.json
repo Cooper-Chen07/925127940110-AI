@@ -1,0 +1,65 @@
+{
+  "version": "V107",
+  "series": "legacy",
+  "title": "清场解除等兵与实际塔火掩护",
+  "changes": [
+    "清场后解除旧撤退等兵限制。",
+    "沿途塔实际锁定正在攻击且处于射程内的活友军时，允许祭司接近工厂。"
+  ],
+  "result_summary": "四图 4 局：2 胜、2 超时，无祭司阵亡；仍存在推进与转换停滞。",
+  "status": "局部修复",
+  "path": "versions/legacy/V107",
+  "source_sha256": {
+    "UsrAI.cpp": "4E91E062A3432D89DF442FAB381CCAC1E523828767DA33A4C973DDF0BEBBC3E0",
+    "UsrAI.h": "A5898346B6147C320471D722E64566C1C1F00D16BB992F4CABA5BF8E135FE4BE"
+  },
+  "historical_evidence": [
+    "v107_source_hashes.json",
+    "v107阶段说明.md"
+  ],
+  "test_details": {
+    "games": [
+      {
+        "map": "map1",
+        "rotation": 0,
+        "normal_end": true,
+        "classification": "timeout",
+        "frame": 45000,
+        "win": false,
+        "game_seconds": 1800.0,
+        "score": 584
+      },
+      {
+        "map": "map2",
+        "rotation": 180,
+        "normal_end": true,
+        "classification": "win",
+        "frame": 42926,
+        "win": true,
+        "game_seconds": 1717.04,
+        "score": 610
+      },
+      {
+        "map": "map3",
+        "rotation": 270,
+        "normal_end": true,
+        "classification": "timeout",
+        "frame": 45000,
+        "win": false,
+        "game_seconds": 1800.0,
+        "score": 505
+      },
+      {
+        "map": "map",
+        "rotation": 90,
+        "normal_end": true,
+        "classification": "win",
+        "frame": 41556,
+        "win": true,
+        "game_seconds": 1662.24,
+        "score": 566
+      }
+    ]
+  },
+  "archived_on": "2026-10-13"
+}
