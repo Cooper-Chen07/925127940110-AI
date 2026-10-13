@@ -1,0 +1,65 @@
+{
+  "version": "V94",
+  "series": "legacy",
+  "title": "住房建造者接替与持续射击",
+  "changes": [
+    "承接 V93 的不可达工地及施工停滞建造者接替。",
+    "减少非紧急走位打断弓兵射程内攻击，保留必要避险。"
+  ],
+  "result_summary": "四图 4 局：2 胜、2 超时；未证实稳定性提升。",
+  "status": "局部修复",
+  "path": "versions/legacy/V94",
+  "source_sha256": {
+    "UsrAI.cpp": "6A560E87CE6D837304CDFD87B1DFC07EEFB4A9D4435A0B3607923389697792BF",
+    "UsrAI.h": "A5898346B6147C320471D722E64566C1C1F00D16BB992F4CABA5BF8E135FE4BE"
+  },
+  "historical_evidence": [
+    "v94_source_hashes.json",
+    "v94阶段说明.md"
+  ],
+  "test_details": {
+    "games": [
+      {
+        "map": "map1",
+        "rotation": 0,
+        "normal_end": true,
+        "classification": "timeout",
+        "frame": 45000,
+        "win": false,
+        "game_seconds": 1800.0,
+        "score": 543
+      },
+      {
+        "map": "map2",
+        "rotation": 180,
+        "normal_end": true,
+        "classification": "win",
+        "frame": 36339,
+        "win": true,
+        "game_seconds": 1453.56,
+        "score": 524
+      },
+      {
+        "map": "map3",
+        "rotation": 270,
+        "normal_end": true,
+        "classification": "timeout",
+        "frame": 45000,
+        "win": false,
+        "game_seconds": 1800.0,
+        "score": 516
+      },
+      {
+        "map": "map",
+        "rotation": 90,
+        "normal_end": true,
+        "classification": "win",
+        "frame": 41678,
+        "win": true,
+        "game_seconds": 1667.12,
+        "score": 610
+      }
+    ]
+  },
+  "archived_on": "2026-10-13"
+}
