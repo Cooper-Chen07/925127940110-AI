@@ -1,0 +1,43 @@
+{
+  "version": "PB1",
+  "series": "purebow",
+  "title": "纯复合弓独立分支",
+  "changes": [
+    "只主动训练复合弓，前排护卫由祭司转换敌兵补充。",
+    "取消原 15 分 20 秒最早出击门槛，按第二波后安全状态与兵力集结。"
+  ],
+  "result_summary": "仅本地 map/0° 与 map2/0° 两局获胜；未提交 OJ，未完成四图四旋转验证。",
+  "status": "实验分支",
+  "path": "versions/purebow/PB1",
+  "source_sha256": {
+    "UsrAI.cpp": "82A3914D27D1C772F4CFCCA43B559F8A1F0E15347E2FD4E166D9B59DC4F557B4",
+    "UsrAI.h": "A353A87CED1BDBA0729E5167C18BDD85B737695B1F8CF4F0689746604897D3B0"
+  },
+  "historical_evidence": [
+    "pb1_summary.json",
+    "manifest.json"
+  ],
+  "test_details": {
+    "games": [
+      {
+        "map": "map",
+        "rotation": 0,
+        "normalEnd": true,
+        "win": true,
+        "frame": 33867,
+        "gameSeconds": 1354.68
+      },
+      {
+        "map": "map2",
+        "rotation": 0,
+        "normalEnd": true,
+        "win": true,
+        "frame": 32707,
+        "gameSeconds": 1308.28
+      }
+    ],
+    "oj_tested": false
+  },
+  "archived_on": "2026-10-13",
+  "historical_date": "2026-10-08"
+}
