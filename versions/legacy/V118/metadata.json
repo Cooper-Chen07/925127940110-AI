@@ -1,0 +1,65 @@
+{
+  "version": "V118",
+  "series": "legacy",
+  "title": "连续收尾入口条件",
+  "changes": [
+    "要求当前视野内有活箭塔、工厂已探明，且连续 10 秒无可见活敌军。",
+    "接近途中遇敌返回交战，已进入真实转换距离的施法保持。"
+  ],
+  "result_summary": "四图 4 局：2 胜、1 超时、1 祭司阵亡；V119 退步后回退至此版。",
+  "status": "历史回退基线",
+  "path": "versions/legacy/V118",
+  "source_sha256": {
+    "UsrAI.cpp": "F3EACBF98E5D8CE696ED9C8F6DC67CA8225BD8A2BF2ECB700B3D368F0A224885",
+    "UsrAI.h": "A5898346B6147C320471D722E64566C1C1F00D16BB992F4CABA5BF8E135FE4BE"
+  },
+  "historical_evidence": [
+    "v118_source_hashes.json",
+    "v118阶段说明.md"
+  ],
+  "test_details": {
+    "games": [
+      {
+        "map": "map1",
+        "rotation": 0,
+        "normal_end": true,
+        "classification": "win",
+        "frame": 43849,
+        "win": true,
+        "game_seconds": 1753.96,
+        "score": 554
+      },
+      {
+        "map": "map2",
+        "rotation": 180,
+        "normal_end": true,
+        "classification": "timeout",
+        "frame": 45000,
+        "win": false,
+        "game_seconds": 1800.0,
+        "score": 616
+      },
+      {
+        "map": "map3",
+        "rotation": 270,
+        "normal_end": true,
+        "classification": "priest_dead",
+        "frame": 43540,
+        "win": false,
+        "game_seconds": 1741.6,
+        "score": 503
+      },
+      {
+        "map": "map",
+        "rotation": 90,
+        "normal_end": true,
+        "classification": "win",
+        "frame": 36701,
+        "win": true,
+        "game_seconds": 1468.04,
+        "score": 550
+      }
+    ]
+  },
+  "archived_on": "2026-10-13"
+}
