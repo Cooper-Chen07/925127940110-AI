@@ -1,0 +1,22 @@
+{
+  "version": "R20",
+  "series": "rewrite",
+  "title": "可达撤退与多地图验证",
+  "changes": [
+    "在重写策略中完善按已探索地形选择可达撤退位置，并验证第二类地图。"
+  ],
+  "result_summary": "当时确认 2 次本地胜利；标准 Release 与更广地图验证尚待完成。",
+  "status": "阶段节点",
+  "path": "versions/rewrite/R20",
+  "source_sha256": {
+    "UsrAI.cpp": "8391FAB6CEBD266D15339A417017DCD942C94EE836BCE433B06805A5FC663C2E",
+    "UsrAI.h": "A353A87CED1BDBA0729E5167C18BDD85B737695B1F8CF4F0689746604897D3B0"
+  },
+  "historical_evidence": [
+    "manifest.json",
+    "策略与验证.md"
+  ],
+  "test_details": {},
+  "archived_on": "2026-10-13",
+  "historical_date": "2026-10-08"
+}
