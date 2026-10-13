@@ -1,0 +1,4 @@
+versions/**/UsrAI.cpp -text
+versions/**/UsrAI.h -text
+*.md text eol=lf
+versions/**/*.json text eol=lf

@@ -1,0 +1,23 @@
+{
+  "version": "V18",
+  "series": "legacy",
+  "title": "农田建造任务与指令去重",
+  "changes": [
+    "跨帧登记尚未出现地基的农田任务，减少建田指令被重新派工打断。",
+    "增加同帧调度去重，并检查行军后排实际到位。"
+  ],
+  "result_summary": "Release 构建通过；50 项反攻与 10 项建田场景检查通过，未据此认定整局稳定。",
+  "status": "历史修复",
+  "path": "versions/legacy/V18",
+  "source_sha256": {
+    "UsrAI.cpp": "378F6824F536A230FC997D1E742E43EE1B0D81791C803450072B029269F879FF",
+    "UsrAI.h": "C0F0110B614AF8661004F4E65B893FD46D54AA9CE10FE18666C19D8D249A2C55"
+  },
+  "historical_evidence": [
+    "v18_source_hashes.json",
+    "排查记录.md"
+  ],
+  "test_details": {},
+  "archived_on": "2026-10-13",
+  "historical_date": "2026-10-05"
+}

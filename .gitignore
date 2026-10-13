@@ -1,0 +1,6 @@
+versions/**/*.log
+versions/**/*.exe
+versions/**/*.video
+versions/**/res.rcc
+versions/**/debug/
+versions/**/release/
